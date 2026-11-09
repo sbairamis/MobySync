@@ -1,6 +1,6 @@
 services:
   mobysync:
-    image: steliosbairam/mobysync:latest
+    image: ghcr.io/sbairamis/mobysync:latest
     container_name: mobysync
     restart: unless-stopped
     ports:

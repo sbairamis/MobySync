@@ -2,7 +2,7 @@
 
 **MobySync** is a lightweight, high-performance Docker container auto-updater designed for home labs and production environments. It monitors your running containers, intelligently pulls new images, and safely replaces containers while respecting dependency chains and providing automated rollbacks on failure.
 
-Built with .NET 8, MobySync is designed to be a "set-and-forget" solution for keeping your Docker stack up-to-date with minimal manual intervention.
+Built with .NET 10, MobySync is designed to be a "set-and-forget" solution for keeping your Docker stack up-to-date with minimal manual intervention.
 
 ---
 
@@ -68,7 +68,7 @@ By default, MobySync monitors **all running containers**. You can use labels to 
 ```yaml
 services:
   mobysync:
-    image: steliosbairam/mobysync:latest
+    image: ghcr.io/sbairamis/mobysync:latest
     container_name: mobysync
     restart: unless-stopped
     ports:
