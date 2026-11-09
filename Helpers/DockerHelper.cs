@@ -28,7 +28,9 @@ public class DockerHelper
     {
         var dockerSocketUri = new Uri("unix:///var/run/docker.sock");
 
-        _dockerClient = new DockerClientConfiguration(dockerSocketUri).CreateClient();
+        _dockerClient = new DockerClientBuilder()
+            .WithEndpoint(dockerSocketUri)
+            .Build();
 
         _logger = logger;
 
