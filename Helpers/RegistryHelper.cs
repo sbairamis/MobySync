@@ -22,7 +22,7 @@ public class RegistryHelper(ILogger<RegistryHelper> logger, IHttpClientFactory h
 
     // Returns the manifest digest currently published for baseImageName:tag.
     // Uses credentials if provided; falls back to anonymous on auth failure.
-    public async Task<string?> GetManifestDigest(string baseImageName, string tag, AuthConfig credentials)
+    public virtual async Task<string?> GetManifestDigest(string baseImageName, string tag, AuthConfig credentials)
     {
         var (registryHost, repository) = ParseImageName(baseImageName);
         var hasCredentials = !string.IsNullOrEmpty(credentials.Username);

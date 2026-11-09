@@ -11,4 +11,11 @@
       <PackageReference Include="Docker.DotNet.Enhanced" Version="4.3.3" />
     </ItemGroup>
 
+    <ItemGroup>
+      <Compile Remove="MobySync.Tests/**" />
+      <Content Remove="MobySync.Tests/**" />
+      <EmbeddedResource Remove="MobySync.Tests/**" />
+      <None Remove="MobySync.Tests/**" />
+    </ItemGroup>
+
 </Project>

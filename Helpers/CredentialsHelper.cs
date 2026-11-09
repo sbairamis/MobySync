@@ -17,7 +17,7 @@ public class CredentialsHelper(ILogger<CredentialsHelper> logger)
         "docker.io"                     // older Docker CLI versions
     ];
 
-    public async Task<AuthConfig> FetchCredentials(string baseImageName)
+    public virtual async Task<AuthConfig> FetchCredentials(string baseImageName)
     {
         var parts = baseImageName.Split('/');
 

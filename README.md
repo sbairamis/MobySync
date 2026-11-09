@@ -45,6 +45,7 @@ Built with .NET 10, MobySync is designed to be a "set-and-forget" solution for k
 | `UPDATE_MINUTE` | Minute of the hour to run updates (0-59) | `30` |
 | `TZ` | Timezone for the update schedule (e.g., `Europe/London`) | `UTC` |
 | `PRUNE_IMAGES` | Set to `true` to remove old images after updates | `false` |
+| `SELF_UPDATE` | Set to `false` to disable MobySync from updating itself | `true` |
 | `EXCLUDED_CONTAINERS`| Comma-separated list of container names to ignore | - |
 | `IMAGE_TAG_OVERRIDES`| Global tag overrides (see [Advanced Configuration](#advanced-configuration)) | - |
 | `DISCORD_WEBHOOK_URL`| URL for Discord notifications | - |

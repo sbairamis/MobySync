@@ -7,6 +7,10 @@ using MobySync.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Configuration.AddJsonFile("appsettings-example.json", optional: true, reloadOnChange: false);
+builder.Configuration.AddJsonFile("appsettings.json", optional: true, reloadOnChange: false);
+builder.Configuration.AddEnvironmentVariables();
+
 // Register Services
 builder.Services.AddSingleton<DockerHelper>();
 builder.Services.AddSingleton<UpdateCoordinator>();
@@ -15,7 +19,12 @@ builder.Services.AddSingleton<RegistryHelper>();
 builder.Services.AddSingleton<INotificationHelper, DiscordNotificationHelper>();
 builder.Services.AddSingleton<INotificationHelper, GenericWebhookNotificationHelper>();
 
-builder.Services.AddHostedService<UpdateService>();
+var selfUpdateTargetId = Environment.GetEnvironmentVariable("MOBYSYNC_SELF_UPDATE_TARGET");
+
+if (string.IsNullOrWhiteSpace(selfUpdateTargetId))
+{
+    builder.Services.AddHostedService<UpdateService>();
+}
 
 builder.Services.AddHttpClient();
 
@@ -27,6 +36,14 @@ builder.Logging.AddSystemdConsole(options =>
 });
 
 var app = builder.Build();
+
+if (!string.IsNullOrWhiteSpace(selfUpdateTargetId))
+{
+    var targetImage = Environment.GetEnvironmentVariable("MOBYSYNC_SELF_TARGET_IMAGE");
+    var coordinator = app.Services.GetRequiredService<UpdateCoordinator>();
+    await coordinator.ExecuteSelfUpdate(selfUpdateTargetId, targetImage);
+    return;
+}
 
 if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("API_KEY")))
 {
@@ -43,6 +60,8 @@ if (apiSection is null || string.IsNullOrEmpty(apiSection.Ip) || string.IsNullOr
     
     Environment.Exit(1);
 }
+
+app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
 app.MapGroup("/api")
    .AddEndpointFilter<ApiKeyFilter>()

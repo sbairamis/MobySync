@@ -2,19 +2,32 @@ using System.Text.RegularExpressions;
 using MobySync.Models;
 using Docker.DotNet;
 using Docker.DotNet.Models;
+using Microsoft.Extensions.DependencyInjection;
 using MobySync.Interfaces;
 
 namespace MobySync.Helpers;
 
 public class DockerHelper
 {
-    private readonly DockerClient _dockerClient;
+    public const string SelfUpdaterContainerName = "mobysync-self-updater";
+
+    private readonly IDockerClient _dockerClient;
 
     private readonly ILogger<DockerHelper> _logger;
 
     private readonly CredentialsHelper _credentialsHelper;
 
     private bool _pruneImages;
+
+    private readonly bool _selfUpdate;
+
+    private readonly TimeSpan _stabilityWindow;
+
+    private readonly TimeSpan _healthCheckTimeout;
+
+    private readonly TimeSpan _pollInterval;
+
+    private readonly string _selfHostname;
 
     private readonly HashSet<string> _excludedContainers;
 
@@ -24,13 +37,34 @@ public class DockerHelper
 
     private readonly RegistryHelper _registryHelper;
 
+    [ActivatorUtilitiesConstructor]
     public DockerHelper(ILogger<DockerHelper> logger, CredentialsHelper credentialsHelper, RegistryHelper registryHelper)
+        : this(logger, credentialsHelper, registryHelper, null, null, null, null, null)
     {
-        var dockerSocketUri = new Uri("unix:///var/run/docker.sock");
+    }
 
-        _dockerClient = new DockerClientBuilder()
-            .WithEndpoint(dockerSocketUri)
-            .Build();
+    public DockerHelper(
+        ILogger<DockerHelper> logger,
+        CredentialsHelper credentialsHelper,
+        RegistryHelper registryHelper,
+        IDockerClient? dockerClient,
+        TimeSpan? stabilityWindow = null,
+        string? selfHostname = null,
+        TimeSpan? healthCheckTimeout = null,
+        TimeSpan? pollInterval = null)
+    {
+        if (dockerClient is not null)
+        {
+            _dockerClient = dockerClient;
+        }
+        else
+        {
+            var dockerSocketUri = new Uri("unix:///var/run/docker.sock");
+
+            _dockerClient = new DockerClientBuilder()
+                .WithEndpoint(dockerSocketUri)
+                .Build();
+        }
 
         _logger = logger;
 
@@ -38,11 +72,34 @@ public class DockerHelper
 
         _registryHelper = registryHelper;
 
+        var defaultStabilitySeconds = int.TryParse(Environment.GetEnvironmentVariable("STABILITY_WINDOW_SECONDS"), out var parsedStability) && parsedStability > 0
+            ? parsedStability
+            : 10;
+
+        var defaultHealthTimeoutSeconds = int.TryParse(Environment.GetEnvironmentVariable("HEALTHCHECK_TIMEOUT_SECONDS"), out var parsedHealthTimeout) && parsedHealthTimeout > 0
+            ? parsedHealthTimeout
+            : 60;
+
+        _stabilityWindow = stabilityWindow ?? TimeSpan.FromSeconds(defaultStabilitySeconds);
+
+        _healthCheckTimeout = healthCheckTimeout ?? TimeSpan.FromSeconds(defaultHealthTimeoutSeconds);
+
+        _pollInterval = pollInterval ?? TimeSpan.FromSeconds(1);
+
+        _selfHostname = selfHostname ?? Environment.MachineName;
+
         _pruneImages = false;
 
         if (bool.TryParse(Environment.GetEnvironmentVariable("PRUNE_IMAGES"), out var pruneImagesParsed))
         {
             _pruneImages = pruneImagesParsed;
+        }
+
+        _selfUpdate = true;
+
+        if (bool.TryParse(Environment.GetEnvironmentVariable("SELF_UPDATE"), out var selfUpdateParsed))
+        {
+            _selfUpdate = selfUpdateParsed;
         }
 
         var excludedRaw = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS") ?? string.Empty;
@@ -134,12 +191,11 @@ public class DockerHelper
         var selfName = string.Empty;
         try
         {
-            var hostname = Environment.MachineName;
-            var self = runningContainers.FirstOrDefault(c => c.ID.StartsWith(hostname, StringComparison.OrdinalIgnoreCase));
+            var self = FindSelfContainer(runningContainers);
             if (self is not null)
             {
                 selfName = self.Names.First().TrimStart('/');
-                _logger.LogInformation("Auto-excluding self: {Name}", selfName);
+                _logger.LogInformation("Auto-excluding self from regular batch: {Name}", selfName);
             }
         }
         catch (Exception ex)
@@ -147,7 +203,10 @@ public class DockerHelper
             _logger.LogWarning(ex, "Could not detect own container — skipping self-exclusion");
         }
 
-        var excluded = new HashSet<string>(_excludedContainers, StringComparer.OrdinalIgnoreCase);
+        var excluded = new HashSet<string>(_excludedContainers, StringComparer.OrdinalIgnoreCase)
+        {
+            SelfUpdaterContainerName
+        };
         if (!string.IsNullOrEmpty(selfName))
             excluded.Add(selfName);
 
@@ -169,6 +228,336 @@ public class DockerHelper
             string.Join(", ", monitoredContainers.Select(c => c.Names.First().TrimStart('/'))));
 
         return monitoredContainers;
+    }
+
+    private ContainerListResponse? FindSelfContainer(IEnumerable<ContainerListResponse> runningContainers)
+    {
+        if (string.IsNullOrWhiteSpace(_selfHostname))
+            return null;
+
+        return runningContainers.FirstOrDefault(c => c.ID.StartsWith(_selfHostname, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public async Task<UpdateSummary?> CheckAndTriggerSelfUpdate()
+    {
+        if (!_selfUpdate)
+        {
+            _logger.LogInformation("Self-update is disabled (SELF_UPDATE=false)");
+            return null;
+        }
+
+        try
+        {
+            var allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
+            var runningContainers = allContainers.Where(c => c.State == "running").ToList();
+            var self = FindSelfContainer(runningContainers);
+
+            if (self is null)
+            {
+                _logger.LogWarning("Could not detect own container — skipping self-update check");
+                return null;
+            }
+
+            var selfName = self.Names.First().TrimStart('/');
+
+            if (_excludedContainers.Contains(selfName))
+            {
+                _logger.LogInformation("Self container {Name} is in EXCLUDED_CONTAINERS — skipping self-update", selfName);
+                return null;
+            }
+
+            var baseImageName = FetchBaseImageName(self.Image);
+            var targetTag = ResolveTargetTag(self, baseImageName);
+
+            if (IsPinnedVersionTag(targetTag))
+            {
+                _logger.LogInformation("Self container {Container} uses pinned version tag ({Tag}), skipping self-update", selfName, targetTag);
+                return null;
+            }
+
+            var runningImageInfo = await _dockerClient.Images.InspectImageAsync(self.ImageID);
+            if (runningImageInfo.RepoDigests == null || !runningImageInfo.RepoDigests.Any())
+            {
+                _logger.LogInformation("Self container {Container} uses a locally built image ({Image}), skipping self-update", selfName, baseImageName);
+                return null;
+            }
+
+            var authCredentials = await _credentialsHelper.FetchCredentials(baseImageName);
+            var remoteDigest = await _registryHelper.GetManifestDigest(baseImageName, targetTag, authCredentials);
+
+            if (remoteDigest == null)
+            {
+                _logger.LogWarning("Could not retrieve remote digest for self ({Image}:{Tag}) — treating as up to date", baseImageName, targetTag);
+                return null;
+            }
+
+            var runningDigests = runningImageInfo.RepoDigests
+                .Where(d => d.Contains('@'))
+                .Select(d => d.Split('@')[1])
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            if (runningDigests.Contains(remoteDigest))
+            {
+                _logger.LogInformation("Self container {Container} is already running the latest version", selfName);
+                return null;
+            }
+
+            _logger.LogInformation("New image available for self ({Image}:{Tag}) — pulling before spawning self-updater", baseImageName, targetTag);
+
+            try
+            {
+                await _dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
+                {
+                    FromImage = baseImageName,
+                    Tag = targetTag
+                }, authCredentials, new Progress<JSONMessage>());
+            }
+            catch (Exception pullEx) when (IsAuthError(pullEx))
+            {
+                _logger.LogWarning("Self image pull with credentials failed for {Image} — retrying anonymously", baseImageName);
+                await _dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
+                {
+                    FromImage = baseImageName,
+                    Tag = targetTag
+                }, new AuthConfig(), new Progress<JSONMessage>());
+            }
+
+            await SpawnSelfUpdaterContainer(self, allContainers, baseImageName, targetTag);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to check or trigger self-update");
+            var failureSummary = new UpdateSummary();
+            failureSummary.FailedPulls.Add(new ContainerUpdateResult
+            {
+                ContainerName = "mobysync (self-update)",
+                ImageName = "mobysync",
+                ErrorMessage = $"Self-update trigger failed: {ex.Message}",
+                Success = false
+            });
+            return failureSummary;
+        }
+    }
+
+    private async Task SpawnSelfUpdaterContainer(
+        ContainerListResponse self,
+        IList<ContainerListResponse> allContainers,
+        string baseImageName,
+        string targetTag)
+    {
+        var existingHelper = allContainers.FirstOrDefault(c =>
+            c.Names.Any(n => string.Equals(n.TrimStart('/'), SelfUpdaterContainerName, StringComparison.OrdinalIgnoreCase)));
+
+        if (existingHelper is not null)
+        {
+            _logger.LogInformation("Removing existing self-updater container {Id}", existingHelper.ID);
+            await _dockerClient.Containers.RemoveContainerAsync(existingHelper.ID, new ContainerRemoveParameters { Force = true });
+        }
+
+        var selfInspect = await _dockerClient.Containers.InspectContainerAsync(self.ID);
+        var fullImage = $"{baseImageName}:{targetTag}";
+
+        var envList = new List<string>();
+        var inheritedPrefixes = new[] { "DISCORD_WEBHOOK_URL=", "WEBHOOK_URL=", "TZ=", "PRUNE_IMAGES=" };
+
+        if (selfInspect.Config?.Env is not null)
+        {
+            foreach (var envEntry in selfInspect.Config.Env)
+            {
+                if (inheritedPrefixes.Any(prefix => envEntry.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                {
+                    envList.Add(envEntry);
+                }
+            }
+        }
+
+        envList.Add($"MOBYSYNC_SELF_UPDATE_TARGET={self.ID}");
+        envList.Add($"MOBYSYNC_SELF_TARGET_IMAGE={fullImage}");
+
+        var binds = selfInspect.HostConfig?.Binds?
+            .Where(b => b.Contains("docker.sock", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (binds is null || binds.Count == 0)
+        {
+            binds = ["/var/run/docker.sock:/var/run/docker.sock"];
+        }
+
+        var hostConfig = new HostConfig
+        {
+            AutoRemove = true,
+            Binds = binds
+        };
+
+        if (selfInspect.HostConfig?.Mounts is not null && selfInspect.HostConfig.Mounts.Any())
+        {
+            var socketMounts = selfInspect.HostConfig.Mounts
+                .Where(m => (m.Source != null && m.Source.Contains("docker.sock", StringComparison.OrdinalIgnoreCase))
+                         || (m.Target != null && m.Target.Contains("docker.sock", StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+
+            if (socketMounts.Count > 0)
+                hostConfig.Mounts = socketMounts;
+        }
+
+        if (!string.IsNullOrWhiteSpace(selfInspect.HostConfig?.NetworkMode)
+            && !selfInspect.HostConfig.NetworkMode.StartsWith("container:", StringComparison.OrdinalIgnoreCase))
+        {
+            hostConfig.NetworkMode = selfInspect.HostConfig.NetworkMode;
+        }
+
+        var createParams = new CreateContainerParameters
+        {
+            Name = SelfUpdaterContainerName,
+            Image = fullImage,
+            Env = envList,
+            HostConfig = hostConfig
+        };
+
+        var createdHelper = await _dockerClient.Containers.CreateContainerAsync(createParams);
+        var started = await _dockerClient.Containers.StartContainerAsync(createdHelper.ID, new ContainerStartParameters());
+
+        if (!started)
+            throw new InvalidOperationException($"Failed to start self-updater helper container {SelfUpdaterContainerName}");
+
+        _logger.LogInformation("Started self-updater helper container {HelperName} ({HelperId}) targeting {SelfId}",
+            SelfUpdaterContainerName, createdHelper.ID, self.ID);
+    }
+
+    public async Task<UpdateSummary> ExecuteSelfUpdateSwap(string targetContainerId, string? targetImageOverride = null)
+    {
+        var summary = new UpdateSummary();
+        var startTime = DateTime.Now;
+        var transactionLog = new Stack<ContainerCheckpoint>();
+
+        ContainerInspectResponse containerConfiguration;
+        try
+        {
+            containerConfiguration = await _dockerClient.Containers.InspectContainerAsync(targetContainerId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Failed to inspect target container {ContainerId} for self-update", targetContainerId);
+            summary.FailedPulls.Add(new ContainerUpdateResult
+            {
+                ContainerName = targetContainerId,
+                ImageName = targetImageOverride ?? "mobysync",
+                ErrorMessage = $"Inspect target failed: {ex.Message}",
+                Success = false
+            });
+            summary.TotalDuration = DateTime.Now - startTime;
+            return summary;
+        }
+
+        var originalName = containerConfiguration.Name.TrimStart('/');
+        var backupName = $"{originalName}-backup";
+        var fullImage = !string.IsNullOrWhiteSpace(targetImageOverride)
+            ? targetImageOverride
+            : (containerConfiguration.Config?.Image ?? "mobysync:latest");
+
+        var baseImageName = FetchBaseImageName(fullImage);
+        var targetTag = ExtractTagFromImage(fullImage) ?? "latest";
+        var newContainerId = string.Empty;
+
+        try
+        {
+            // Clean up any leftover backup container from a previous interrupted run
+            var allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
+            var staleBackup = allContainers.FirstOrDefault(c =>
+                c.ID != containerConfiguration.ID &&
+                c.Names.Any(n => string.Equals(n.TrimStart('/'), backupName, StringComparison.OrdinalIgnoreCase)));
+
+            if (staleBackup is not null)
+            {
+                await _dockerClient.Containers.RemoveContainerAsync(staleBackup.ID, new ContainerRemoveParameters { Force = true });
+            }
+
+            // Clear Docker-generated short-ID hostname so the new container gets its own short ID as hostname
+            if (containerConfiguration.Config is not null
+                && !string.IsNullOrEmpty(containerConfiguration.Config.Hostname)
+                && containerConfiguration.ID.StartsWith(containerConfiguration.Config.Hostname, StringComparison.OrdinalIgnoreCase))
+            {
+                containerConfiguration.Config.Hostname = string.Empty;
+            }
+
+            var createParams = containerConfiguration.Config is not null
+                ? new CreateContainerParameters(containerConfiguration.Config)
+                : new CreateContainerParameters();
+
+            createParams.Image = $"{baseImageName}:{targetTag}";
+            createParams.HostConfig = containerConfiguration.HostConfig;
+            createParams.NetworkingConfig = new NetworkingConfig { EndpointsConfig = containerConfiguration.NetworkSettings?.Networks };
+            createParams.Name = originalName;
+
+            await _dockerClient.Containers.RenameContainerAsync(
+                containerConfiguration.ID,
+                new ContainerRenameParameters { NewName = backupName },
+                CancellationToken.None);
+
+            await _dockerClient.Containers.StopContainerAsync(containerConfiguration.ID, new ContainerStopParameters());
+
+            var createdContainer = await _dockerClient.Containers.CreateContainerAsync(createParams);
+            newContainerId = createdContainer.ID;
+
+            var successfulContainerStart = await _dockerClient.Containers.StartContainerAsync(createdContainer.ID, new ContainerStartParameters());
+            if (!successfulContainerStart)
+                throw new InvalidOperationException($"Failed to start replacement container {originalName}");
+
+            await VerifyContainerStartupAsync(createdContainer.ID, originalName);
+
+            try
+            {
+                await _dockerClient.Containers.RemoveContainerAsync(containerConfiguration.ID, new ContainerRemoveParameters { Force = true });
+            }
+            catch (Exception removeEx)
+            {
+                _logger.LogWarning(removeEx, "Failed to remove backup container {BackupName}, manual intervention is needed", backupName);
+            }
+
+            if (_pruneImages)
+            {
+                await _dockerClient.Images.PruneImagesAsync(new ImagesPruneParameters());
+            }
+
+            summary.Successes.Add(new ContainerUpdateResult
+            {
+                ContainerName = originalName,
+                ImageName = baseImageName,
+                NewTag = targetTag,
+                Success = true
+            });
+
+            _logger.LogInformation("Successfully self-updated {Container} to {Tag}", originalName, targetTag);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex, "Self-update failed while replacing {Container}. Rolling back to previous container.", originalName);
+
+            summary.Rollbacks.Add(new ContainerUpdateResult
+            {
+                ContainerName = originalName,
+                ImageName = baseImageName,
+                ErrorMessage = ex.Message,
+                Success = false
+            });
+
+            transactionLog.Push(new ContainerCheckpoint
+            {
+                OldId = containerConfiguration.ID,
+                NewId = newContainerId,
+                OriginalName = originalName,
+                BackupName = backupName
+            });
+
+            await AttemptRollback(transactionLog);
+        }
+        finally
+        {
+            summary.TotalDuration = DateTime.Now - startTime;
+        }
+
+        return summary;
     }
     
     private Dictionary<string, List<ContainerListResponse>> GroupDependentContainers(IList<ContainerListResponse> monitoredContainers)
@@ -415,6 +804,13 @@ public class DockerHelper
             
             try
             {
+                if (containerConfiguration.Config is not null
+                    && !string.IsNullOrEmpty(containerConfiguration.Config.Hostname)
+                    && containerConfiguration.ID.StartsWith(containerConfiguration.Config.Hostname, StringComparison.OrdinalIgnoreCase))
+                {
+                    containerConfiguration.Config.Hostname = string.Empty;
+                }
+
                 var createParams = new CreateContainerParameters(containerConfiguration.Config)
                 {
                     Image = $"{baseImageName}:{targetTag}",
@@ -431,6 +827,7 @@ public class DockerHelper
                 await _dockerClient.Containers.StopContainerAsync(containerForUpdate.ID, new ContainerStopParameters());
 
                 var createdContainer = await _dockerClient.Containers.CreateContainerAsync(createParams);
+                newContainerId = createdContainer.ID;
                 
                 // Start the updated container
                 var successfulContainerStart = await _dockerClient.Containers.StartContainerAsync(createdContainer.ID, new ContainerStartParameters());
@@ -438,18 +835,7 @@ public class DockerHelper
                 if (!successfulContainerStart)
                     throw new InvalidOperationException($"Failed to start container {originalName}");
                 
-                // Wait some time in order to check the state of the created container
-                await Task.Delay(TimeSpan.FromSeconds(10));
-            
-                var createdContainerConfiguration = await _dockerClient.Containers.InspectContainerAsync(createdContainer.ID);
-                
-                newContainerId =  createdContainerConfiguration.ID;
-                
-                if (!createdContainerConfiguration.State.Running)
-                {
-                    throw new InvalidOperationException($"Container {originalName} crashed after starting, " +
-                                                        $"exit Code: {createdContainerConfiguration.State.ExitCode}");
-                }
+                await VerifyContainerStartupAsync(createdContainer.ID, originalName);
                 
                 // Add entry for rollback in case of a failure
                 transactionLog.Push(new ContainerCheckpoint
@@ -507,6 +893,131 @@ public class DockerHelper
             {
                 _logger.LogWarning(ex, "Failed to remove backup container {BackupName}, manual intervention is needed", checkpoint.BackupName);
             }
+        }
+    }
+
+    private async Task VerifyContainerStartupAsync(string containerId, string containerName)
+    {
+        var initialInspect = await _dockerClient.Containers.InspectContainerAsync(containerId);
+
+        EnsureProcessRunningAndNotRestarted(initialInspect, containerName, initialPid: 0, initialStartedAt: null);
+
+        var hasHealthcheck = initialInspect.State?.Health is not null
+            && !string.IsNullOrWhiteSpace(initialInspect.State.Health.Status)
+            && !string.Equals(initialInspect.State.Health.Status, "none", StringComparison.OrdinalIgnoreCase);
+
+        if (hasHealthcheck)
+        {
+            _logger.LogInformation("Container {Container} defines a Docker HEALTHCHECK — monitoring health status (timeout: {Timeout}s)",
+                containerName, _healthCheckTimeout.TotalSeconds);
+
+            await VerifyWithDockerHealthcheckAsync(containerId, containerName, initialInspect);
+        }
+        else
+        {
+            _logger.LogInformation("Container {Container} has no Docker HEALTHCHECK — monitoring process stability (PID/restarts) for {Window}s",
+                containerName, _stabilityWindow.TotalSeconds);
+
+            await VerifyProcessStabilityAsync(containerId, containerName, initialInspect);
+        }
+    }
+
+    private async Task VerifyWithDockerHealthcheckAsync(
+        string containerId,
+        string containerName,
+        ContainerInspectResponse currentInspect)
+    {
+        var initialPid = currentInspect.State?.Pid ?? 0;
+        var initialStartedAt = currentInspect.State?.StartedAt;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        while (true)
+        {
+            EnsureProcessRunningAndNotRestarted(currentInspect, containerName, initialPid, initialStartedAt);
+
+            var healthStatus = currentInspect.State?.Health?.Status;
+
+            if (string.Equals(healthStatus, "healthy", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("Container {Container} reported healthy after {Elapsed:F1}s",
+                    containerName, stopwatch.Elapsed.TotalSeconds);
+                return;
+            }
+
+            if (string.Equals(healthStatus, "unhealthy", StringComparison.OrdinalIgnoreCase))
+            {
+                var lastLog = currentInspect.State?.Health?.Log?.LastOrDefault()?.Output?.Trim();
+                var detail = string.IsNullOrWhiteSpace(lastLog) ? string.Empty : $" (last output: {lastLog})";
+                throw new InvalidOperationException(
+                    $"Container {containerName} reported unhealthy status{detail}");
+            }
+
+            if (stopwatch.Elapsed >= _healthCheckTimeout)
+            {
+                throw new InvalidOperationException(
+                    $"Container {containerName} healthcheck timed out after {_healthCheckTimeout.TotalSeconds:F0}s (last status: '{healthStatus}')");
+            }
+
+            await Task.Delay(_pollInterval);
+            currentInspect = await _dockerClient.Containers.InspectContainerAsync(containerId);
+        }
+    }
+
+    private async Task VerifyProcessStabilityAsync(
+        string containerId,
+        string containerName,
+        ContainerInspectResponse initialInspect)
+    {
+        var initialPid = initialInspect.State?.Pid ?? 0;
+        var initialStartedAt = initialInspect.State?.StartedAt;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        while (stopwatch.Elapsed < _stabilityWindow)
+        {
+            var remaining = _stabilityWindow - stopwatch.Elapsed;
+            var delay = remaining < _pollInterval ? remaining : _pollInterval;
+
+            if (delay > TimeSpan.Zero)
+                await Task.Delay(delay);
+
+            var currentInspect = await _dockerClient.Containers.InspectContainerAsync(containerId);
+            EnsureProcessRunningAndNotRestarted(currentInspect, containerName, initialPid, initialStartedAt);
+        }
+    }
+
+    private static void EnsureProcessRunningAndNotRestarted(
+        ContainerInspectResponse inspect,
+        string containerName,
+        long initialPid,
+        string? initialStartedAt)
+    {
+        var state = inspect.State;
+        if (state is null)
+            throw new InvalidOperationException($"Container {containerName} returned null state during inspection");
+
+        if (state.OOMKilled)
+            throw new InvalidOperationException($"Container {containerName} was OOM-killed (exit code: {state.ExitCode})");
+
+        if (state.Dead)
+            throw new InvalidOperationException($"Container {containerName} entered 'dead' state (exit code: {state.ExitCode})");
+
+        if (state.Restarting)
+            throw new InvalidOperationException($"Container {containerName} crashed and is restarting (exit code: {state.ExitCode}, restart count: {inspect.RestartCount})");
+
+        if (!state.Running)
+            throw new InvalidOperationException($"Container {containerName} crashed after starting, exit Code: {state.ExitCode}");
+
+        if (inspect.RestartCount > 0)
+            throw new InvalidOperationException($"Container {containerName} crashed and was restarted by restart policy (restart count: {inspect.RestartCount}, last exit code: {state.ExitCode})");
+
+        if (initialPid > 0 && state.Pid > 0 && state.Pid != initialPid)
+            throw new InvalidOperationException($"Container {containerName} main process restarted unexpectedly (PID changed from {initialPid} to {state.Pid})");
+
+        if (!string.IsNullOrWhiteSpace(initialStartedAt)
+            && !string.IsNullOrWhiteSpace(state.StartedAt)
+            && !string.Equals(initialStartedAt, state.StartedAt, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Container {containerName} restarted unexpectedly (StartedAt changed from {initialStartedAt} to {state.StartedAt})");
         }
     }
     

@@ -30,6 +30,44 @@ public class UpdateCoordinator(DockerHelper dockerHelper, IEnumerable<INotificat
                                     "{Provider}", notificationHelper.ProviderName);
             }
         }
+
+        var selfUpdateFailureSummary = await dockerHelper.CheckAndTriggerSelfUpdate();
+
+        if (selfUpdateFailureSummary is not null)
+        {
+            foreach (var notificationHelper in notificationHelpers.Where(helper => helper.IsConfigured))
+            {
+                try
+                {
+                    await notificationHelper.SendSummary(selfUpdateFailureSummary);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Failed to send self-update failure notification via {Provider}",
+                        notificationHelper.ProviderName);
+                }
+            }
+        }
+    }
+
+    public async Task ExecuteSelfUpdate(string targetContainerId, string? targetImage = null)
+    {
+        logger.LogInformation("Executing self-update helper mode for target container {ContainerId}", targetContainerId);
+
+        var summary = await dockerHelper.ExecuteSelfUpdateSwap(targetContainerId, targetImage);
+
+        foreach (var notificationHelper in notificationHelpers.Where(helper => helper.IsConfigured))
+        {
+            try
+            {
+                await notificationHelper.SendSummary(summary);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to send self-update summary notification via {Provider}",
+                    notificationHelper.ProviderName);
+            }
+        }
     }
 
     public async Task SendStartupNotifications()
