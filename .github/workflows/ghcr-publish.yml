@@ -39,4 +39,6 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ghcr.io/${{ steps.string.outputs.repo }}:latest
+          tags: |
+            ghcr.io/${{ steps.string.outputs.repo }}:latest
+            ghcr.io/${{ steps.string.outputs.repo }}:${{ github.ref_name }}
