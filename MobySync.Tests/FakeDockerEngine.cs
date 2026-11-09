@@ -37,6 +37,7 @@ public class SimulatedDockerState
     public Dictionary<string, SimulatedContainer> Containers { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, List<string>> ImageDigests { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<(string FromImage, string Tag)> PulledImages { get; } = [];
+    public List<(string NetworkIdOrName, string ContainerId, EndpointSettings? Endpoint)> ConnectedNetworks { get; } = [];
     public List<string> OperationLog { get; } = [];
     public bool PruneCalled { get; set; }
 
@@ -65,10 +66,14 @@ public class SimulatedDockerState
         var imagesProxy = DispatchProxy.Create<IImageOperations, ImageOperationsProxy>();
         ((ImageOperationsProxy)(object)imagesProxy).State = this;
 
+        var networksProxy = DispatchProxy.Create<INetworkOperations, NetworkOperationsProxy>();
+        ((NetworkOperationsProxy)(object)networksProxy).State = this;
+
         var clientProxy = DispatchProxy.Create<IDockerClient, DockerClientProxy>();
         var clientImpl = (DockerClientProxy)(object)clientProxy;
         clientImpl.Containers = containersProxy;
         clientImpl.Images = imagesProxy;
+        clientImpl.Networks = networksProxy;
 
         return clientProxy;
     }
@@ -80,6 +85,7 @@ public class DockerClientProxy : DispatchProxy
 {
     public IContainerOperations Containers { get; set; } = null!;
     public IImageOperations Images { get; set; } = null!;
+    public INetworkOperations Networks { get; set; } = null!;
 
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
     {
@@ -87,6 +93,7 @@ public class DockerClientProxy : DispatchProxy
         {
             "get_Containers" => Containers,
             "get_Images" => Images,
+            "get_Networks" => Networks,
             "Dispose" => null,
             _ => throw new NotImplementedException($"IDockerClient.{targetMethod?.Name} is not implemented in proxy.")
         };
@@ -301,6 +308,33 @@ public class ImageOperationsProxy : DispatchProxy
         State.PruneCalled = true;
         State.OperationLog.Add("prune");
         return Task.FromResult(new ImagesPruneResponse());
+    }
+}
+
+public class NetworkOperationsProxy : DispatchProxy
+{
+    public SimulatedDockerState State { get; set; } = null!;
+
+    protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+    {
+        return targetMethod?.Name switch
+        {
+            nameof(INetworkOperations.ConnectNetworkAsync) => ConnectNetworkAsync((string)args![0]!, (NetworkConnectParameters)args[1]!),
+            _ => throw new NotImplementedException($"INetworkOperations.{targetMethod?.Name} is not implemented in proxy.")
+        };
+    }
+
+    private Task ConnectNetworkAsync(string networkIdOrName, NetworkConnectParameters parameters)
+    {
+        State.ConnectedNetworks.Add((networkIdOrName, parameters.Container, parameters.EndpointConfig));
+        State.OperationLog.Add($"connect-network:{networkIdOrName}:{parameters.Container}");
+
+        if (State.Containers.TryGetValue(parameters.Container, out var container) && parameters.EndpointConfig is not null)
+        {
+            container.Networks[networkIdOrName] = parameters.EndpointConfig;
+        }
+
+        return Task.CompletedTask;
     }
 }
 

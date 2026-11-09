@@ -481,13 +481,15 @@ public class DockerHelper
                 containerConfiguration.Config.Hostname = string.Empty;
             }
 
+            var (primaryNetworkingConfig, secondaryNetworks) = SplitPrimaryAndSecondaryNetworks(containerConfiguration);
+
             var createParams = containerConfiguration.Config is not null
                 ? new CreateContainerParameters(containerConfiguration.Config)
                 : new CreateContainerParameters();
 
             createParams.Image = $"{baseImageName}:{targetTag}";
             createParams.HostConfig = containerConfiguration.HostConfig;
-            createParams.NetworkingConfig = new NetworkingConfig { EndpointsConfig = containerConfiguration.NetworkSettings?.Networks };
+            createParams.NetworkingConfig = primaryNetworkingConfig;
             createParams.Name = originalName;
 
             await _dockerClient.Containers.RenameContainerAsync(
@@ -499,6 +501,8 @@ public class DockerHelper
 
             var createdContainer = await _dockerClient.Containers.CreateContainerAsync(createParams);
             newContainerId = createdContainer.ID;
+
+            await AttachSecondaryNetworksAsync(createdContainer.ID, originalName, secondaryNetworks);
 
             var successfulContainerStart = await _dockerClient.Containers.StartContainerAsync(createdContainer.ID, new ContainerStartParameters());
             if (!successfulContainerStart)
@@ -547,7 +551,8 @@ public class DockerHelper
                 OldId = containerConfiguration.ID,
                 NewId = newContainerId,
                 OriginalName = originalName,
-                BackupName = backupName
+                BackupName = backupName,
+                OriginalNetworks = containerConfiguration.NetworkSettings?.Networks
             });
 
             await AttemptRollback(transactionLog);
@@ -811,11 +816,13 @@ public class DockerHelper
                     containerConfiguration.Config.Hostname = string.Empty;
                 }
 
+                var (primaryNetworkingConfig, secondaryNetworks) = SplitPrimaryAndSecondaryNetworks(containerConfiguration);
+
                 var createParams = new CreateContainerParameters(containerConfiguration.Config)
                 {
                     Image = $"{baseImageName}:{targetTag}",
                     HostConfig = containerConfiguration.HostConfig,
-                    NetworkingConfig = new NetworkingConfig { EndpointsConfig = containerConfiguration.NetworkSettings.Networks },
+                    NetworkingConfig = primaryNetworkingConfig,
                     Name = originalName
                 };
                 
@@ -828,6 +835,8 @@ public class DockerHelper
 
                 var createdContainer = await _dockerClient.Containers.CreateContainerAsync(createParams);
                 newContainerId = createdContainer.ID;
+
+                await AttachSecondaryNetworksAsync(createdContainer.ID, originalName, secondaryNetworks);
                 
                 // Start the updated container
                 var successfulContainerStart = await _dockerClient.Containers.StartContainerAsync(createdContainer.ID, new ContainerStartParameters());
@@ -843,7 +852,8 @@ public class DockerHelper
                     OldId = containerConfiguration.ID,
                     NewId = newContainerId,
                     OriginalName = originalName,
-                    BackupName = backupName
+                    BackupName = backupName,
+                    OriginalNetworks = containerConfiguration.NetworkSettings?.Networks
                 });
 
                 summary.Successes.Add(new ContainerUpdateResult
@@ -874,7 +884,8 @@ public class DockerHelper
                     OldId = containerConfiguration.ID,
                     NewId = newContainerId,
                     OriginalName = originalName,
-                    BackupName = backupName
+                    BackupName = backupName,
+                    OriginalNetworks = containerConfiguration.NetworkSettings?.Networks
                 });
 
                 await AttemptRollback(transactionLog);
@@ -1045,6 +1056,26 @@ public class DockerHelper
                     
                     await _dockerClient.Containers.RenameContainerAsync(checkpoint.OldId, new ContainerRenameParameters { NewName = checkpoint.OriginalName }, CancellationToken.None);
                 }
+
+                if (checkpoint.OriginalNetworks is not null && checkpoint.OriginalNetworks.Count > 1)
+                {
+                    var currentNetworks = oldContainerInspect.NetworkSettings?.Networks;
+                    foreach (var (networkName, endpoint) in checkpoint.OriginalNetworks)
+                    {
+                        if (currentNetworks is null || !currentNetworks.ContainsKey(networkName))
+                        {
+                            var networkTarget = !string.IsNullOrWhiteSpace(endpoint.NetworkID)
+                                ? endpoint.NetworkID
+                                : networkName;
+
+                            await _dockerClient.Networks.ConnectNetworkAsync(networkTarget, new NetworkConnectParameters
+                            {
+                                Container = checkpoint.OldId,
+                                EndpointConfig = SanitizeEndpointSettings(endpoint, checkpoint.OldId)
+                            });
+                        }
+                    }
+                }
                 
                 await _dockerClient.Containers.StartContainerAsync(checkpoint.OldId, new ContainerStartParameters());
             }
@@ -1054,6 +1085,78 @@ public class DockerHelper
                                         "Manual intervention is needed. Backup container is {BackupName}", checkpoint.OriginalName, checkpoint.BackupName);
             }
         }
+    }
+
+    private static (NetworkingConfig PrimaryNetworkingConfig, List<(string NetworkName, EndpointSettings Endpoint)> SecondaryNetworks)
+        SplitPrimaryAndSecondaryNetworks(ContainerInspectResponse containerConfiguration)
+    {
+        var allNetworks = containerConfiguration.NetworkSettings?.Networks;
+        if (allNetworks is null || allNetworks.Count == 0)
+        {
+            return (new NetworkingConfig(), []);
+        }
+
+        var networkMode = containerConfiguration.HostConfig?.NetworkMode;
+        var primaryNetworkName = !string.IsNullOrWhiteSpace(networkMode) && allNetworks.ContainsKey(networkMode)
+            ? networkMode
+            : allNetworks.Keys.First();
+
+        var primaryEndpoint = SanitizeEndpointSettings(allNetworks[primaryNetworkName], containerConfiguration.ID);
+        var primaryNetworkingConfig = new NetworkingConfig
+        {
+            EndpointsConfig = new Dictionary<string, EndpointSettings>
+            {
+                [primaryNetworkName] = primaryEndpoint
+            }
+        };
+
+        var secondaryNetworks = allNetworks
+            .Where(kvp => !string.Equals(kvp.Key, primaryNetworkName, StringComparison.Ordinal))
+            .Select(kvp => (NetworkName: kvp.Key, Endpoint: SanitizeEndpointSettings(kvp.Value, containerConfiguration.ID)))
+            .ToList();
+
+        return (primaryNetworkingConfig, secondaryNetworks);
+    }
+
+    private async Task AttachSecondaryNetworksAsync(
+        string containerId,
+        string containerName,
+        IReadOnlyList<(string NetworkName, EndpointSettings Endpoint)> secondaryNetworks)
+    {
+        foreach (var (networkName, endpoint) in secondaryNetworks)
+        {
+            var networkTarget = !string.IsNullOrWhiteSpace(endpoint.NetworkID)
+                ? endpoint.NetworkID
+                : networkName;
+
+            _logger.LogInformation("Connecting container {Container} to additional network {Network}", containerName, networkName);
+
+            await _dockerClient.Networks.ConnectNetworkAsync(networkTarget, new NetworkConnectParameters
+            {
+                Container = containerId,
+                EndpointConfig = endpoint
+            });
+        }
+    }
+
+    private static EndpointSettings SanitizeEndpointSettings(EndpointSettings source, string oldContainerId)
+    {
+        var oldShortId = !string.IsNullOrEmpty(oldContainerId) && oldContainerId.Length >= 12
+            ? oldContainerId[..12]
+            : oldContainerId;
+
+        var sanitizedAliases = source.Aliases?
+            .Where(a => !string.Equals(a, oldShortId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        return new EndpointSettings
+        {
+            IPAMConfig = source.IPAMConfig,
+            Links = source.Links,
+            Aliases = sanitizedAliases,
+            NetworkID = source.NetworkID,
+            DriverOpts = source.DriverOpts
+        };
     }
     
     private List<ContainerListResponse> SortContainersByDependencies(IList<ContainerListResponse> containers)

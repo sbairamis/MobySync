@@ -610,4 +610,65 @@ public class SelfUpdateTests
         Assert.Equal("mobysync", state.Containers[SelfId].Name);
         Assert.True(state.Containers[SelfId].Running);
     }
+
+    [Fact]
+    public async Task ExecuteSelfUpdateSwap_WhenContainerAttachedToMultipleNetworks_PreservesAllNetworksAndSanitizesAliases()
+    {
+        var state = new SimulatedDockerState();
+        var selfContainer = CreateDefaultSelfContainer();
+        selfContainer.HostConfig.NetworkMode = "frontend";
+        selfContainer.Networks = new Dictionary<string, EndpointSettings>
+        {
+            ["frontend"] = new()
+            {
+                NetworkID = "net-frontend-id",
+                Aliases = ["mobysync", SelfHostname]
+            },
+            ["backend"] = new()
+            {
+                NetworkID = "net-backend-id",
+                Aliases = ["mobysync-internal", SelfHostname],
+                IPAMConfig = new EndpointIPAMConfig { IPv4Address = "172.20.0.10" }
+            },
+            ["monitoring"] = new()
+            {
+                NetworkID = "net-monitoring-id",
+                Aliases = ["metrics", SelfHostname]
+            }
+        };
+        state.Containers[SelfId] = selfContainer;
+
+        var helper = new DockerHelper(
+            NullLogger<DockerHelper>.Instance,
+            new FakeCredentialsHelper(),
+            new FakeRegistryHelper(new Dictionary<string, string?>()),
+            state.CreateClient(),
+            stabilityWindow: TimeSpan.FromMilliseconds(10),
+            selfHostname: "helper-container-hostname",
+            healthCheckTimeout: TimeSpan.FromSeconds(1),
+            pollInterval: TimeSpan.FromMilliseconds(5));
+
+        var summary = await helper.ExecuteSelfUpdateSwap(SelfId, SelfImage);
+
+        Assert.Single(summary.Successes);
+
+        // Primary network ('frontend') was attached via CreateContainerParameters, with old short-ID alias stripped
+        var replacement = Assert.Single(state.Containers.Values);
+        Assert.True(replacement.Networks.ContainsKey("frontend"));
+        Assert.Contains("mobysync", replacement.Networks["frontend"].Aliases);
+        Assert.DoesNotContain(SelfHostname, replacement.Networks["frontend"].Aliases);
+
+        // Both secondary networks ('backend' and 'monitoring') were explicitly connected via Networks.ConnectNetworkAsync
+        Assert.Equal(2, state.ConnectedNetworks.Count);
+        var backendConn = Assert.Single(state.ConnectedNetworks, n => n.NetworkIdOrName == "net-backend-id");
+        Assert.Equal(replacement.Id, backendConn.ContainerId);
+        Assert.Contains("mobysync-internal", backendConn.Endpoint!.Aliases);
+        Assert.DoesNotContain(SelfHostname, backendConn.Endpoint.Aliases);
+        Assert.Equal("172.20.0.10", backendConn.Endpoint.IPAMConfig.IPv4Address);
+
+        var monitoringConn = Assert.Single(state.ConnectedNetworks, n => n.NetworkIdOrName == "net-monitoring-id");
+        Assert.Equal(replacement.Id, monitoringConn.ContainerId);
+        Assert.Contains("metrics", monitoringConn.Endpoint!.Aliases);
+        Assert.DoesNotContain(SelfHostname, monitoringConn.Endpoint.Aliases);
+    }
 }
