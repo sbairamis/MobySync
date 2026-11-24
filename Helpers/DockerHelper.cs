@@ -179,6 +179,19 @@ public class DockerHelper
                     continue;
                 }
 
+                if (await IsAutoRemoveContainerAsync(container.ID))
+                {
+                    _logger.LogInformation("Container {Container} has AutoRemove (--rm) enabled, skipping", containerName);
+                    checkSummary.Skipped.Add(new ContainerUpdateResult
+                    {
+                        ContainerName = containerName,
+                        ImageName = baseImageName,
+                        ErrorMessage = "Container has AutoRemove (--rm) enabled — cannot safely backup or roll back",
+                        Success = false
+                    });
+                    continue;
+                }
+
                 ImageInspectResponse runningImageInfo;
                 try
                 {
@@ -418,6 +431,12 @@ public class DockerHelper
                 return null;
             }
 
+            if (await IsAutoRemoveContainerAsync(self.ID))
+            {
+                _logger.LogInformation("Self container {Container} has AutoRemove (--rm) enabled, skipping self-update", selfName);
+                return null;
+            }
+
             var runningImageInfo = await _dockerClient.Images.InspectImageAsync(self.ImageID);
             if (runningImageInfo.RepoDigests == null || !runningImageInfo.RepoDigests.Any())
             {
@@ -582,6 +601,19 @@ public class DockerHelper
                 continue;
             }
 
+            if (await IsAutoRemoveContainerAsync(container.ID))
+            {
+                _logger.LogInformation("Container {Container} has AutoRemove (--rm) enabled, skipping", containerName);
+                summary.Skipped.Add(new ContainerUpdateResult
+                {
+                    ContainerName = containerName,
+                    ImageName = baseImageName,
+                    ErrorMessage = "Container has AutoRemove (--rm) enabled — cannot safely backup or roll back",
+                    Success = false
+                });
+                continue;
+            }
+
             _logger.LogInformation("Processing {Container}: image='{RawImage}', base='{Base}', tag='{Tag}'",
                 containerName, container.Image, baseImageName, targetTag);
 
@@ -731,6 +763,12 @@ public class DockerHelper
                     $"Docker stream error while pulling {baseImageName}:{targetTag}: {ErrorMessage}");
             }
         }
+    }
+
+    private async Task<bool> IsAutoRemoveContainerAsync(string containerId)
+    {
+        var inspect = await _dockerClient.Containers.InspectContainerAsync(containerId);
+        return inspect.HostConfig?.AutoRemove == true;
     }
 
     private static HashSet<string> ExtractSha256Digests(IEnumerable<string> repoDigests) =>

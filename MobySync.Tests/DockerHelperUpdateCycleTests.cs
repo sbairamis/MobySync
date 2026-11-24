@@ -681,4 +681,49 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForImageUpdates_WhenContainerHasAutoRemoveEnabled_SkipsContainer()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["ephemeral-id"] = new SimulatedContainer
+            {
+                Id = "ephemeral-id",
+                Name = "ephemeral-worker",
+                Image = "alpine:latest",
+                ImageId = "sha256:alpine-old",
+                Running = true,
+                HostConfig = new HostConfig { AutoRemove = true }
+            };
+            state.ImageDigests["sha256:alpine-old"] = ["alpine@sha256:old"];
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["alpine:latest"] = "sha256:new"
+            });
+
+            var helper = CreateHelper(state, registry);
+            var summary = await helper.CheckForImageUpdates();
+
+            var skipped = Assert.Single(summary.Skipped);
+            Assert.Equal("ephemeral-worker", skipped.ContainerName);
+            Assert.Contains("AutoRemove", skipped.ErrorMessage);
+            Assert.Empty(summary.Successes);
+            Assert.Empty(state.PulledImages);
+            Assert.True(state.Containers["ephemeral-id"].Running);
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }
