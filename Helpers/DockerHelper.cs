@@ -373,6 +373,11 @@ public class DockerHelper
     {
         var allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
 
+        if (await _containerSwapper.RecoverOrphanedBackupsAsync(allContainers, _excludedContainers))
+        {
+            allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
+        }
+
         var runningContainers = allContainers.Where(c => c.State == "running").ToList();
 
         // Auto-detect own container by matching the Docker-assigned hostname (= short container ID)

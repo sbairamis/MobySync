@@ -213,6 +213,68 @@ public class ContainerSwapper(
         return summary;
     }
 
+    public async Task<bool> RecoverOrphanedBackupsAsync(
+        IList<ContainerListResponse> allContainers,
+        IReadOnlySet<string> excludedContainers)
+    {
+        var recoveredAny = false;
+
+        foreach (var container in allContainers)
+        {
+            if (string.Equals(container.State, "running", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var backupName = container.Names.FirstOrDefault()?.TrimStart('/');
+            if (string.IsNullOrWhiteSpace(backupName)
+                || !backupName.EndsWith("-backup", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var originalName = backupName[..^"-backup".Length];
+            if (string.IsNullOrWhiteSpace(originalName) || excludedContainers.Contains(originalName))
+                continue;
+
+            var primaryContainer = allContainers.FirstOrDefault(other =>
+                other.ID != container.ID &&
+                other.Names.Any(n => string.Equals(n.TrimStart('/'), originalName, StringComparison.OrdinalIgnoreCase)));
+
+            if (primaryContainer is not null
+                && string.Equals(primaryContainer.State, "running", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                logger.LogWarning("Recovering orphaned backup container {BackupName} back to {OriginalName}",
+                    backupName, originalName);
+
+                if (primaryContainer is not null)
+                {
+                    await dockerClient.Containers.RemoveContainerAsync(
+                        primaryContainer.ID,
+                        new ContainerRemoveParameters { Force = true });
+                }
+
+                await dockerClient.Containers.RenameContainerAsync(
+                    container.ID,
+                    new ContainerRenameParameters { NewName = originalName },
+                    CancellationToken.None);
+
+                await dockerClient.Containers.StartContainerAsync(container.ID, new ContainerStartParameters());
+                recoveredAny = true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogCritical(ex, "Failed to recover orphaned backup container {BackupName} as {OriginalName}",
+                    backupName, originalName);
+            }
+        }
+
+        return recoveredAny;
+    }
+
     private async Task SwapSingleContainerAsync(
         ContainerInspectResponse containerConfiguration,
         string originalName,

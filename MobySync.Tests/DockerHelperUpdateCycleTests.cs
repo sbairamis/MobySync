@@ -800,4 +800,47 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForImageUpdates_WhenOrphanedStoppedBackupExistsWithNoPrimaryContainer_RecoversAndStartsBackup()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["redis-backup-id"] = new SimulatedContainer
+            {
+                Id = "redis-backup-id",
+                Name = "redis-backup",
+                Image = "redis:latest",
+                ImageId = "sha256:redis-old",
+                Running = false
+            };
+            state.ImageDigests["sha256:redis-old"] = ["redis@sha256:current"];
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["redis:latest"] = "sha256:current"
+            });
+
+            var helper = CreateHelper(state, registry);
+            var summary = await helper.CheckForImageUpdates();
+
+            Assert.Equal("redis", state.Containers["redis-backup-id"].Name);
+            Assert.True(state.Containers["redis-backup-id"].Running);
+            Assert.Contains("redis", summary.UpToDate);
+            Assert.Contains("rename:redis-backup->redis", state.OperationLog);
+            Assert.Contains("start:redis", state.OperationLog);
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }
