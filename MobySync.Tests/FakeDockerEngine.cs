@@ -56,6 +56,11 @@ public class SimulatedDockerState
     /// </summary>
     public Action<ImagesCreateParameters>? OnPullImage { get; set; }
 
+    /// <summary>
+    /// Optional hook to inspect AuthConfig or throw during image pull.
+    /// </summary>
+    public Action<ImagesCreateParameters, AuthConfig?>? OnPullImageWithAuth { get; set; }
+
     private int _nextIdCounter = 1;
 
     public IDockerClient CreateClient()
@@ -279,7 +284,9 @@ public class ImageOperationsProxy : DispatchProxy
         return targetMethod?.Name switch
         {
             nameof(IImageOperations.InspectImageAsync) => InspectImageAsync((string)args![0]!),
-            nameof(IImageOperations.CreateImageAsync) => CreateImageAsync((ImagesCreateParameters)args![0]!),
+            nameof(IImageOperations.CreateImageAsync) => CreateImageAsync(
+                (ImagesCreateParameters)args![0]!,
+                args.Length > 1 ? args[1] as AuthConfig : null),
             nameof(IImageOperations.PruneImagesAsync) => PruneImagesAsync(),
             _ => throw new NotImplementedException($"IImageOperations.{targetMethod?.Name} is not implemented in proxy.")
         };
@@ -295,9 +302,10 @@ public class ImageOperationsProxy : DispatchProxy
         });
     }
 
-    private Task CreateImageAsync(ImagesCreateParameters parameters)
+    private Task CreateImageAsync(ImagesCreateParameters parameters, AuthConfig? authConfig)
     {
         State.OnPullImage?.Invoke(parameters);
+        State.OnPullImageWithAuth?.Invoke(parameters, authConfig);
         State.PulledImages.Add((parameters.FromImage ?? string.Empty, parameters.Tag ?? string.Empty));
         State.OperationLog.Add($"pull:{parameters.FromImage}:{parameters.Tag}");
         return Task.CompletedTask;
@@ -340,15 +348,24 @@ public class NetworkOperationsProxy : DispatchProxy
 
 public class FakeCredentialsHelper() : CredentialsHelper(NullLogger<CredentialsHelper>.Instance)
 {
+    public Dictionary<string, AuthConfig> CredentialsByImage { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public override Task<AuthConfig> FetchCredentials(string baseImageName) =>
-        Task.FromResult(new AuthConfig());
+        Task.FromResult(CredentialsByImage.TryGetValue(baseImageName, out var auth) ? auth : new AuthConfig());
 }
 
 public class FakeRegistryHelper(Dictionary<string, string?> remoteDigests)
     : RegistryHelper(NullLogger<RegistryHelper>.Instance, null!)
 {
+    public Func<string, string, AuthConfig, Task<string?>>? OnGetManifestDigest { get; set; }
+
     public override Task<string?> GetManifestDigest(string baseImageName, string tag, AuthConfig credentials)
     {
+        if (OnGetManifestDigest is not null)
+        {
+            return OnGetManifestDigest(baseImageName, tag, credentials);
+        }
+
         var key = $"{baseImageName}:{tag}";
         return Task.FromResult(remoteDigests.GetValueOrDefault(key));
     }
