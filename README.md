@@ -25,7 +25,7 @@ Built with .NET 10, MobySync is designed to be a "set-and-forget" solution for k
 
 ## How It Works
 
-1. **Discovery:** MobySync scans all running containers (excluding `EXCLUDED_CONTAINERS` and handling itself separately at the end of the cycle) and automatically skips pinned semantic version tags (e.g., `1.2.3`, `v2.0.1`) and locally built images.
+1. **Discovery:** MobySync recovers any orphaned stopped `<name>-backup` containers left by a previously interrupted update, then scans all running containers (excluding `EXCLUDED_CONTAINERS` and handling itself separately at the end of the cycle). Containers with pinned semantic version tags (e.g., `1.2.3`, `v2.0.1`), locally built images, or `AutoRemove` (`--rm`) enabled are automatically skipped.
 2. **Dependency Mapping:** It partitions containers into isolated dependency groups and topologically sorts them via the `com.mobysync.depends-on` label to determine the safe update order.
 3. **Direct Registry Check & Pre-Pulling:** For each group, MobySync queries the remote registry directly for the latest manifest digest (`Docker-Content-Digest`) and pulls all updated images (respecting credentials) *before* stopping any running containers — minimizing downtime and safely aborting the group if a pull fails.
 4. **Container Replacement & Multi-Network Preservation:**
