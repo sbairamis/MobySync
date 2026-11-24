@@ -879,4 +879,64 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForAvailableUpdates_WhenOneContainerInspectThrows_RecordsErrorAndChecksRemainingContainers()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["vanished-id"] = new SimulatedContainer
+            {
+                Id = "vanished-id",
+                Name = "vanished-app",
+                Image = "alpine:latest",
+                ImageId = "sha256:alpine-old",
+                Running = true
+            };
+            state.ImageDigests["sha256:alpine-old"] = ["alpine@sha256:old"];
+
+            state.Containers["healthy-id"] = new SimulatedContainer
+            {
+                Id = "healthy-id",
+                Name = "healthy-app",
+                Image = "nginx:latest",
+                ImageId = "sha256:nginx-old",
+                Running = true
+            };
+            state.ImageDigests["sha256:nginx-old"] = ["nginx@sha256:old"];
+
+            state.OnInspectContainer = c =>
+            {
+                if (c.Id == "vanished-id")
+                    throw new InvalidOperationException("container vanished mid-check");
+            };
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["nginx:latest"] = "sha256:new"
+            });
+
+            var helper = CreateHelper(state, registry);
+            var checkSummary = await helper.CheckForAvailableUpdates();
+
+            var error = Assert.Single(checkSummary.Errors);
+            Assert.Equal("vanished-app", error.ContainerName);
+            Assert.Contains("container vanished mid-check", error.ErrorMessage);
+
+            var available = Assert.Single(checkSummary.UpdatesAvailable);
+            Assert.Equal("healthy-app", available.ContainerName);
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }

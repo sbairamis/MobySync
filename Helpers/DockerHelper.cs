@@ -194,14 +194,29 @@ public class DockerHelper
                     continue;
                 }
 
-                if (await IsAutoRemoveContainerAsync(container.ID))
+                try
                 {
-                    _logger.LogInformation("Container {Container} has AutoRemove (--rm) enabled, skipping", containerName);
-                    checkSummary.Skipped.Add(new ContainerUpdateResult
+                    if (await IsAutoRemoveContainerAsync(container.ID))
+                    {
+                        _logger.LogInformation("Container {Container} has AutoRemove (--rm) enabled, skipping", containerName);
+                        checkSummary.Skipped.Add(new ContainerUpdateResult
+                        {
+                            ContainerName = containerName,
+                            ImageName = baseImageName,
+                            ErrorMessage = "Container has AutoRemove (--rm) enabled — cannot safely backup or roll back",
+                            Success = false
+                        });
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Dry-run check failed to inspect container {Container}", containerName);
+                    checkSummary.Errors.Add(new ContainerUpdateResult
                     {
                         ContainerName = containerName,
                         ImageName = baseImageName,
-                        ErrorMessage = "Container has AutoRemove (--rm) enabled — cannot safely backup or roll back",
+                        ErrorMessage = $"Container inspect failed: {ex.Message}",
                         Success = false
                     });
                     continue;
@@ -638,17 +653,32 @@ public class DockerHelper
                 continue;
             }
 
-            if (await IsAutoRemoveContainerAsync(container.ID))
+            try
             {
-                _logger.LogInformation("Container {Container} has AutoRemove (--rm) enabled, skipping", containerName);
-                summary.Skipped.Add(new ContainerUpdateResult
+                if (await IsAutoRemoveContainerAsync(container.ID))
+                {
+                    _logger.LogInformation("Container {Container} has AutoRemove (--rm) enabled, skipping", containerName);
+                    summary.Skipped.Add(new ContainerUpdateResult
+                    {
+                        ContainerName = containerName,
+                        ImageName = baseImageName,
+                        ErrorMessage = "Container has AutoRemove (--rm) enabled — cannot safely backup or roll back",
+                        Success = false
+                    });
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to inspect container {Container}. Aborting group update.", containerName);
+                summary.FailedPulls.Add(new ContainerUpdateResult
                 {
                     ContainerName = containerName,
                     ImageName = baseImageName,
-                    ErrorMessage = "Container has AutoRemove (--rm) enabled — cannot safely backup or roll back",
+                    ErrorMessage = $"Container inspect failed: {ex.Message}",
                     Success = false
                 });
-                continue;
+                return null;
             }
 
             _logger.LogInformation("Processing {Container}: image='{RawImage}', base='{Base}', tag='{Tag}'",
