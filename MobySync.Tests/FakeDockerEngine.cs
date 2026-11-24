@@ -61,6 +61,11 @@ public class SimulatedDockerState
     /// </summary>
     public Action<ImagesCreateParameters, AuthConfig?>? OnPullImageWithAuth { get; set; }
 
+    /// <summary>
+    /// Optional hook to report JSON stream progress messages during image pull.
+    /// </summary>
+    public Action<ImagesCreateParameters, IProgress<JSONMessage>?>? OnPullImageProgress { get; set; }
+
     private int _nextIdCounter = 1;
 
     public IDockerClient CreateClient()
@@ -286,7 +291,8 @@ public class ImageOperationsProxy : DispatchProxy
             nameof(IImageOperations.InspectImageAsync) => InspectImageAsync((string)args![0]!),
             nameof(IImageOperations.CreateImageAsync) => CreateImageAsync(
                 (ImagesCreateParameters)args![0]!,
-                args.Length > 1 ? args[1] as AuthConfig : null),
+                args.Length > 1 ? args[1] as AuthConfig : null,
+                args.Length > 2 ? args[2] as IProgress<JSONMessage> : null),
             nameof(IImageOperations.PruneImagesAsync) => PruneImagesAsync(),
             _ => throw new NotImplementedException($"IImageOperations.{targetMethod?.Name} is not implemented in proxy.")
         };
@@ -302,10 +308,11 @@ public class ImageOperationsProxy : DispatchProxy
         });
     }
 
-    private Task CreateImageAsync(ImagesCreateParameters parameters, AuthConfig? authConfig)
+    private Task CreateImageAsync(ImagesCreateParameters parameters, AuthConfig? authConfig, IProgress<JSONMessage>? progress)
     {
         State.OnPullImage?.Invoke(parameters);
         State.OnPullImageWithAuth?.Invoke(parameters, authConfig);
+        State.OnPullImageProgress?.Invoke(parameters, progress);
         State.PulledImages.Add((parameters.FromImage ?? string.Empty, parameters.Tag ?? string.Empty));
         State.OperationLog.Add($"pull:{parameters.FromImage}:{parameters.Tag}");
         return Task.CompletedTask;

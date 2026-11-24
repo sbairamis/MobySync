@@ -626,4 +626,59 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForImageUpdates_WhenPullStreamReportsJsonError_AbortsGroupUpdateAndRecordsFailedPull()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["app-id"] = new SimulatedContainer
+            {
+                Id = "app-id",
+                Name = "web-app",
+                Image = "nginx:latest",
+                ImageId = "sha256:app-old",
+                Running = true
+            };
+            state.ImageDigests["sha256:app-old"] = ["nginx@sha256:old"];
+
+            state.OnPullImageProgress = (_, progress) =>
+            {
+                progress?.Report(new JSONMessage
+                {
+                    Error = new JSONError
+                    {
+                        Message = "write /var/lib/docker: no space left on device"
+                    }
+                });
+            };
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["nginx:latest"] = "sha256:new"
+            });
+
+            var helper = CreateHelper(state, registry);
+            var summary = await helper.CheckForImageUpdates();
+
+            var failed = Assert.Single(summary.FailedPulls);
+            Assert.Equal("web-app", failed.ContainerName);
+            Assert.Contains("no space left on device", failed.ErrorMessage);
+            Assert.Empty(summary.Successes);
+            Assert.True(state.Containers["app-id"].Running);
+            Assert.DoesNotContain(state.OperationLog, op => op.StartsWith("stop:", StringComparison.Ordinal));
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }

@@ -690,22 +690,46 @@ public class DockerHelper
     {
         try
         {
+            var progress = new PullProgressReporter();
             await _dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
             {
                 FromImage = baseImageName,
                 Tag = targetTag
-            }, authCredentials, new Progress<JSONMessage>());
+            }, authCredentials, progress);
+            progress.ThrowIfFailed(baseImageName, targetTag);
         }
         catch (Exception pullEx) when (IsAuthError(pullEx))
         {
             // Daemon may be using its own stale cached credentials; retry with an empty AuthConfig
             // so the daemon has no server address hint to look up its own credential store.
             _logger.LogWarning("Pull with credentials failed for {Image} — retrying anonymously", baseImageName);
+            var retryProgress = new PullProgressReporter();
             await _dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
             {
                 FromImage = baseImageName,
                 Tag = targetTag
-            }, new AuthConfig(), new Progress<JSONMessage>());
+            }, new AuthConfig(), retryProgress);
+            retryProgress.ThrowIfFailed(baseImageName, targetTag);
+        }
+    }
+
+    private sealed class PullProgressReporter : IProgress<JSONMessage>
+    {
+        public string? ErrorMessage { get; private set; }
+
+        public void Report(JSONMessage value)
+        {
+            if (!string.IsNullOrWhiteSpace(value.Error?.Message))
+                ErrorMessage = value.Error.Message;
+        }
+
+        public void ThrowIfFailed(string baseImageName, string targetTag)
+        {
+            if (!string.IsNullOrWhiteSpace(ErrorMessage))
+            {
+                throw new InvalidOperationException(
+                    $"Docker stream error while pulling {baseImageName}:{targetTag}: {ErrorMessage}");
+            }
         }
     }
 
