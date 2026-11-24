@@ -1,7 +1,11 @@
 using System.Net;
 using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using MobySync.Extensions;
 using MobySync.Filters;
 using MobySync.Helpers;
 using MobySync.Interfaces;
@@ -835,6 +839,172 @@ public class NotificationAndApiTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", prevExcluded);
+        }
+    }
+
+    [Fact]
+    public async Task UpdateCoordinator_GetStatus_CapsHistoryAtTwentyMostRecentRuns()
+    {
+        var prevSelfUpdate = Environment.GetEnvironmentVariable("SELF_UPDATE");
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        Environment.SetEnvironmentVariable("SELF_UPDATE", "false");
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+            var dockerHelper = new DockerHelper(
+                NullLogger<DockerHelper>.Instance,
+                new FakeCredentialsHelper(),
+                new FakeRegistryHelper(new Dictionary<string, string?>()),
+                state.CreateClient(),
+                TimeSpan.FromMilliseconds(5),
+                "mobysync-host");
+
+            var coordinator = new UpdateCoordinator(
+                dockerHelper,
+                [new FakeNotificationHelper()],
+                NullLogger<UpdateCoordinator>.Instance);
+
+            for (var i = 0; i < 25; i++)
+            {
+                await coordinator.ExecuteScheduledUpdate();
+            }
+
+            var status = coordinator.GetStatus();
+            Assert.Equal(20, status.History.Count);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SELF_UPDATE", prevSelfUpdate);
+            Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", prevExcluded);
+        }
+    }
+
+    [Fact]
+    public async Task RouteExtensions_MapUpdaterEndpoints_HandlesStatusCheckAndTargetedTriggerResponses()
+    {
+        var prevApiKey = Environment.GetEnvironmentVariable("API_KEY");
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        Environment.SetEnvironmentVariable("API_KEY", "route-test-key");
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+            state.Containers["web-id"] = new SimulatedContainer
+            {
+                Id = "web-id",
+                Name = "web",
+                Image = "nginx:latest",
+                ImageId = "sha256:web-img",
+                Running = true
+            };
+            state.ImageDigests["sha256:web-img"] = ["nginx@sha256:old"];
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["nginx:latest"] = "sha256:new"
+            });
+
+            var dockerHelper = new DockerHelper(
+                NullLogger<DockerHelper>.Instance,
+                new FakeCredentialsHelper(),
+                registry,
+                state.CreateClient(),
+                TimeSpan.FromMilliseconds(5),
+                "mobysync-host");
+
+            var coordinator = new UpdateCoordinator(
+                dockerHelper,
+                [new FakeNotificationHelper()],
+                NullLogger<UpdateCoordinator>.Instance);
+
+            var builder = WebApplication.CreateBuilder();
+            builder.Services.AddSingleton(coordinator);
+            await using var app = builder.Build();
+            app.MapGroup("/api")
+                .AddEndpointFilter<ApiKeyFilter>()
+                .MapUpdaterEndpoints();
+
+            var endpoints = ((IEndpointRouteBuilder)app).DataSources
+                .SelectMany(ds => ds.Endpoints)
+                .OfType<RouteEndpoint>()
+                .ToList();
+
+            async Task<(int StatusCode, string Body)> InvokeEndpointAsync(
+                string routePattern,
+                string? apiKey,
+                Dictionary<string, object?>? routeValues = null,
+                string? queryString = null)
+            {
+                var endpoint = Assert.Single(endpoints, e => e.RoutePattern.RawText == routePattern);
+                var context = new DefaultHttpContext
+                {
+                    RequestServices = app.Services
+                };
+                context.Response.Body = new MemoryStream();
+                if (apiKey is not null)
+                    context.Request.Headers["X-API-KEY"] = apiKey;
+                if (routeValues is not null)
+                {
+                    foreach (var kvp in routeValues)
+                        context.Request.RouteValues[kvp.Key] = kvp.Value;
+                }
+                if (!string.IsNullOrEmpty(queryString))
+                    context.Request.QueryString = new QueryString(queryString);
+
+                await endpoint.RequestDelegate!(context);
+                context.Response.Body.Position = 0;
+                using var reader = new StreamReader(context.Response.Body);
+                return (context.Response.StatusCode, await reader.ReadToEndAsync());
+            }
+
+            // Missing API key -> 401
+            var (unauthStatus, _) = await InvokeEndpointAsync("/api/status", apiKey: null);
+            Assert.Equal(StatusCodes.Status401Unauthorized, unauthStatus);
+
+            // GET /api/status -> 200 with state=idle
+            var (statusCode, statusBody) = await InvokeEndpointAsync("/api/status", "route-test-key");
+            Assert.Equal(StatusCodes.Status200OK, statusCode);
+            using (var doc = JsonDocument.Parse(statusBody))
+            {
+                Assert.Equal("idle", doc.RootElement.GetProperty("state").GetString());
+            }
+
+            // POST /api/update/check -> 200 with web in updatesAvailable
+            var (checkCode, checkBody) = await InvokeEndpointAsync("/api/update/check", "route-test-key");
+            Assert.Equal(StatusCodes.Status200OK, checkCode);
+            using (var doc = JsonDocument.Parse(checkBody))
+            {
+                Assert.True(doc.RootElement.GetProperty("hasUpdates").GetBoolean());
+                Assert.Equal("web", doc.RootElement.GetProperty("updatesAvailable")[0].GetProperty("containerName").GetString());
+            }
+
+            // POST /api/update/trigger/missing -> 404
+            var (notFoundCode, _) = await InvokeEndpointAsync(
+                "/api/update/trigger/{containerName}",
+                "route-test-key",
+                new Dictionary<string, object?> { ["containerName"] = "missing" });
+            Assert.Equal(StatusCodes.Status404NotFound, notFoundCode);
+
+            // POST /api/update/trigger/web?includeDependencies=false -> 202
+            var (acceptedCode, acceptedBody) = await InvokeEndpointAsync(
+                "/api/update/trigger/{containerName}",
+                "route-test-key",
+                new Dictionary<string, object?> { ["containerName"] = "web" },
+                "?includeDependencies=false");
+            Assert.Equal(StatusCodes.Status202Accepted, acceptedCode);
+            using (var doc = JsonDocument.Parse(acceptedBody))
+            {
+                Assert.Equal("web", doc.RootElement.GetProperty("container").GetString());
+                Assert.False(doc.RootElement.GetProperty("includeDependencies").GetBoolean());
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("API_KEY", prevApiKey);
             Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", prevExcluded);
         }
     }
