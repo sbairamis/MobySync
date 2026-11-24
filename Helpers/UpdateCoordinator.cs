@@ -245,6 +245,11 @@ public class UpdateCoordinator(DockerHelper dockerHelper, IEnumerable<INotificat
 
         try
         {
+            if (!await dockerHelper.IsMonitoredContainerRunning(containerName))
+            {
+                return null;
+            }
+
             return await StartTargetedUpdateCycle(containerName, includeDependencies);
         }
         finally

@@ -737,4 +737,105 @@ public class NotificationAndApiTests
             Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", prevExcluded);
         }
     }
+
+    [Fact]
+    public async Task UpdateCoordinator_ExecuteTargetedUpdate_WhenContainerNotFound_ReturnsNullWithoutSendingNotifications()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+            var dockerHelper = new DockerHelper(
+                NullLogger<DockerHelper>.Instance,
+                new FakeCredentialsHelper(),
+                new FakeRegistryHelper(new Dictionary<string, string?>()),
+                state.CreateClient(),
+                TimeSpan.FromMilliseconds(5),
+                "mobysync-host");
+
+            var notificationHelper = new FakeNotificationHelper();
+            var coordinator = new UpdateCoordinator(
+                dockerHelper,
+                [notificationHelper],
+                NullLogger<UpdateCoordinator>.Instance);
+
+            var summary = await coordinator.ExecuteTargetedUpdate("missing-app");
+
+            Assert.Null(summary);
+            Assert.Equal(0, notificationHelper.UpdateStartedCount);
+            Assert.Empty(notificationHelper.SentSummaries);
+            Assert.Empty(coordinator.GetStatus().History);
+            Assert.Equal("idle", coordinator.GetStatus().State);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", prevExcluded);
+        }
+    }
+
+    [Fact]
+    public async Task UpdateCoordinator_ExecuteTargetedUpdate_WhenIncludeDependenciesFalse_UpdatesOnlyTargetContainer()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["db-id"] = new SimulatedContainer
+            {
+                Id = "db-id",
+                Name = "db",
+                Image = "postgres:latest",
+                ImageId = "sha256:db-old",
+                Running = true
+            };
+            state.ImageDigests["sha256:db-old"] = ["postgres@sha256:old"];
+
+            state.Containers["api-id"] = new SimulatedContainer
+            {
+                Id = "api-id",
+                Name = "api",
+                Image = "myorg/api:latest",
+                ImageId = "sha256:api-old",
+                Running = true,
+                Labels = new Dictionary<string, string> { ["com.mobysync.depends-on"] = "db" }
+            };
+            state.ImageDigests["sha256:api-old"] = ["myorg/api@sha256:old"];
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["postgres:latest"] = "sha256:new",
+                ["myorg/api:latest"] = "sha256:new"
+            });
+
+            var dockerHelper = new DockerHelper(
+                NullLogger<DockerHelper>.Instance,
+                new FakeCredentialsHelper(),
+                registry,
+                state.CreateClient(),
+                TimeSpan.FromMilliseconds(5),
+                "mobysync-host");
+
+            var coordinator = new UpdateCoordinator(
+                dockerHelper,
+                [new FakeNotificationHelper()],
+                NullLogger<UpdateCoordinator>.Instance);
+
+            var summary = await coordinator.ExecuteTargetedUpdate("api", includeDependencies: false);
+
+            Assert.NotNull(summary);
+            var updated = Assert.Single(summary.Successes);
+            Assert.Equal("api", updated.ContainerName);
+            Assert.True(state.Containers.ContainsKey("db-id"));
+            Assert.False(state.Containers.ContainsKey("api-id"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", prevExcluded);
+        }
+    }
 }
