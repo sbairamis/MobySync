@@ -360,6 +360,7 @@ public class DecoupledComponentsTests
         Assert.True(state.Containers[runningBackupId].Running);
         Assert.True(state.Containers[oldDbId].Running);
         Assert.DoesNotContain(state.OperationLog, op => op == "remove:db-backup");
+        Assert.DoesNotContain(state.OperationLog, op => op == "start:db");
     }
 
     [Fact]

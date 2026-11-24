@@ -419,7 +419,10 @@ public class ContainerSwapper(
                     }
                 }
 
-                await dockerClient.Containers.StartContainerAsync(checkpoint.OldId, new ContainerStartParameters());
+                if (oldContainerInspect.State?.Running != true)
+                {
+                    await dockerClient.Containers.StartContainerAsync(checkpoint.OldId, new ContainerStartParameters());
+                }
             }
             catch (Exception ex)
             {
