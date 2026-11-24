@@ -102,7 +102,7 @@ public class DockerHelper
 
         try
         {
-            var monitoredContainers = await GetMonitoredContainers();
+            var monitoredContainers = await GetMonitoredContainers(recoverOrphanedBackups: true);
 
             if (monitoredContainers is null)
                 return updateSummary;
@@ -171,7 +171,7 @@ public class DockerHelper
 
         try
         {
-            var monitoredContainers = await GetMonitoredContainers();
+            var monitoredContainers = await GetMonitoredContainers(recoverOrphanedBackups: false);
 
             if (monitoredContainers is null)
                 return checkSummary;
@@ -297,7 +297,7 @@ public class DockerHelper
 
         try
         {
-            var monitoredContainers = await GetMonitoredContainers();
+            var monitoredContainers = await GetMonitoredContainers(recoverOrphanedBackups: true);
 
             if (monitoredContainers is null)
                 return updateSummary;
@@ -369,11 +369,11 @@ public class DockerHelper
         return updateSummary;
     }
 
-    private async Task<List<ContainerListResponse>?> GetMonitoredContainers()
+    private async Task<List<ContainerListResponse>?> GetMonitoredContainers(bool recoverOrphanedBackups = false)
     {
         var allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
 
-        if (await _containerSwapper.RecoverOrphanedBackupsAsync(allContainers, _excludedContainers))
+        if (recoverOrphanedBackups && await _containerSwapper.RecoverOrphanedBackupsAsync(allContainers, _excludedContainers))
         {
             allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
         }

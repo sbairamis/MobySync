@@ -843,4 +843,40 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForAvailableUpdates_DryRunDoesNotRecoverOrMutateOrphanedBackupContainers()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["redis-backup-id"] = new SimulatedContainer
+            {
+                Id = "redis-backup-id",
+                Name = "redis-backup",
+                Image = "redis:latest",
+                ImageId = "sha256:redis-old",
+                Running = false
+            };
+
+            var helper = CreateHelper(state, new FakeRegistryHelper(new Dictionary<string, string?>()));
+            var checkSummary = await helper.CheckForAvailableUpdates();
+
+            Assert.False(checkSummary.HasUpdates);
+            Assert.Equal("redis-backup", state.Containers["redis-backup-id"].Name);
+            Assert.False(state.Containers["redis-backup-id"].Running);
+            Assert.Empty(state.OperationLog);
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }
