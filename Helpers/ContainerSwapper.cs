@@ -16,6 +16,7 @@ public class ContainerSwapper(
     {
         // Rollbacks are executed in the opposite direction
         var transactionLog = new Stack<ContainerCheckpoint>();
+        var groupSuccesses = new List<ContainerUpdateResult>();
 
         foreach (var containerForUpdate in containersForReplace)
         {
@@ -45,7 +46,7 @@ public class ContainerSwapper(
                     OriginalNetworks = containerConfiguration.NetworkSettings?.Networks
                 });
 
-                summary.Successes.Add(new ContainerUpdateResult
+                groupSuccesses.Add(new ContainerUpdateResult
                 {
                     ContainerName = originalName,
                     ImageName = baseImageName,
@@ -59,6 +60,18 @@ public class ContainerSwapper(
             {
                 logger.LogCritical(ex, "An unexpected error occurred while trying to replace container {Container}. " +
                                        "Reverting changes of previously updated containers", originalName);
+
+                foreach (var previousSuccess in groupSuccesses)
+                {
+                    summary.Rollbacks.Add(new ContainerUpdateResult
+                    {
+                        ContainerName = previousSuccess.ContainerName,
+                        ImageName = previousSuccess.ImageName,
+                        NewTag = previousSuccess.NewTag,
+                        ErrorMessage = $"Rolled back because dependent container '{originalName}' failed to update",
+                        Success = false
+                    });
+                }
 
                 summary.Rollbacks.Add(new ContainerUpdateResult
                 {
@@ -81,6 +94,8 @@ public class ContainerSwapper(
                 return;
             }
         }
+
+        summary.Successes.AddRange(groupSuccesses);
 
         foreach (var checkpoint in transactionLog)
         {

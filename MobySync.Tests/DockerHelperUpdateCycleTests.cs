@@ -457,8 +457,11 @@ public class DockerHelperUpdateCycleTests
             var helper = CreateHelper(state, registry);
             var summary = await helper.CheckForImageUpdates();
 
-            var rollback = Assert.Single(summary.Rollbacks);
-            Assert.Equal("web", rollback.ContainerName);
+            Assert.Empty(summary.Successes);
+            Assert.Equal(3, summary.Rollbacks.Count);
+            Assert.Contains(summary.Rollbacks, r => r.ContainerName == "db");
+            Assert.Contains(summary.Rollbacks, r => r.ContainerName == "api");
+            Assert.Contains(summary.Rollbacks, r => r.ContainerName == "web");
 
             Assert.Equal(3, state.Containers.Count);
             Assert.True(state.Containers.ContainsKey(originalDbId));
