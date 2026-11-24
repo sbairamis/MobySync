@@ -939,4 +939,91 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForImageUpdates_WhenExcludedBackupContainerExists_DoesNotRecoverIt()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "postgres-backup");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["pg-backup-id"] = new SimulatedContainer
+            {
+                Id = "pg-backup-id",
+                Name = "postgres-backup",
+                Image = "postgres:latest",
+                ImageId = "sha256:pg-old",
+                Running = false
+            };
+
+            var helper = CreateHelper(state, new FakeRegistryHelper(new Dictionary<string, string?>()));
+            await helper.CheckForImageUpdates();
+
+            Assert.Equal("postgres-backup", state.Containers["pg-backup-id"].Name);
+            Assert.False(state.Containers["pg-backup-id"].Running);
+            Assert.Empty(state.OperationLog);
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
+
+    [Fact]
+    public async Task CheckForImageUpdates_WhenStoppedBackupExistsAlongsideRunningPrimary_DoesNotTouchHealthyPrimary()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["redis-live-id"] = new SimulatedContainer
+            {
+                Id = "redis-live-id",
+                Name = "redis",
+                Image = "redis:latest",
+                ImageId = "sha256:redis-current",
+                Running = true
+            };
+            state.ImageDigests["sha256:redis-current"] = ["redis@sha256:current"];
+
+            state.Containers["redis-old-backup-id"] = new SimulatedContainer
+            {
+                Id = "redis-old-backup-id",
+                Name = "redis-backup",
+                Image = "redis:latest",
+                ImageId = "sha256:redis-old",
+                Running = false
+            };
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["redis:latest"] = "sha256:current"
+            });
+
+            var helper = CreateHelper(state, registry);
+            var summary = await helper.CheckForImageUpdates();
+
+            Assert.Contains("redis", summary.UpToDate);
+            Assert.True(state.Containers["redis-live-id"].Running);
+            Assert.False(state.Containers["redis-old-backup-id"].Running);
+            Assert.Equal("redis-backup", state.Containers["redis-old-backup-id"].Name);
+            Assert.Empty(state.OperationLog);
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }

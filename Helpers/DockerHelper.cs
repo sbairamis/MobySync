@@ -387,12 +387,6 @@ public class DockerHelper
     private async Task<List<ContainerListResponse>?> GetMonitoredContainers(bool recoverOrphanedBackups = false)
     {
         var allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
-
-        if (recoverOrphanedBackups && await _containerSwapper.RecoverOrphanedBackupsAsync(allContainers, _excludedContainers))
-        {
-            allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
-        }
-
         var runningContainers = allContainers.Where(c => c.State == "running").ToList();
 
         // Auto-detect own container by matching the Docker-assigned hostname (= short container ID)
@@ -417,6 +411,12 @@ public class DockerHelper
         };
         if (!string.IsNullOrEmpty(selfName))
             excluded.Add(selfName);
+
+        if (recoverOrphanedBackups && await _containerSwapper.RecoverOrphanedBackupsAsync(allContainers, excluded))
+        {
+            allContainers = await _dockerClient.Containers.ListContainersAsync(new ContainersListParameters { All = true });
+            runningContainers = allContainers.Where(c => c.State == "running").ToList();
+        }
 
         var monitoredContainers = runningContainers
             .Where(c => !excluded.Contains(c.Names.First().TrimStart('/')))

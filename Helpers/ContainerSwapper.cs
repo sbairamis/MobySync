@@ -244,8 +244,12 @@ public class ContainerSwapper(
             }
 
             var originalName = backupName[..^"-backup".Length];
-            if (string.IsNullOrWhiteSpace(originalName) || excludedContainers.Contains(originalName))
+            if (string.IsNullOrWhiteSpace(originalName)
+                || excludedContainers.Contains(backupName)
+                || excludedContainers.Contains(originalName))
+            {
                 continue;
+            }
 
             var primaryContainer = allContainers.FirstOrDefault(other =>
                 other.ID != container.ID &&
