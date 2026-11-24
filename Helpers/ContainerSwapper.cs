@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Docker.DotNet;
 using Docker.DotNet.Models;
 using MobySync.Models;
@@ -121,7 +122,7 @@ public class ContainerSwapper(
         bool pruneImages)
     {
         var summary = new UpdateSummary();
-        var startTime = DateTime.Now;
+        var stopwatch = Stopwatch.StartNew();
         var transactionLog = new Stack<ContainerCheckpoint>();
 
         ContainerInspectResponse containerConfiguration;
@@ -139,7 +140,7 @@ public class ContainerSwapper(
                 ErrorMessage = $"Inspect target failed: {ex.Message}",
                 Success = false
             });
-            summary.TotalDuration = DateTime.Now - startTime;
+            summary.TotalDuration = stopwatch.Elapsed;
             return summary;
         }
 
@@ -219,7 +220,7 @@ public class ContainerSwapper(
         }
         finally
         {
-            summary.TotalDuration = DateTime.Now - startTime;
+            summary.TotalDuration = stopwatch.Elapsed;
         }
 
         return summary;

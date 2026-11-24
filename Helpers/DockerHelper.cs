@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Docker.DotNet;
 using Docker.DotNet.Models;
 using Microsoft.Extensions.DependencyInjection;
@@ -98,7 +99,7 @@ public class DockerHelper
     public async Task<UpdateSummary> CheckForImageUpdates()
     {
         var updateSummary = new UpdateSummary();
-        var startTime = DateTime.Now;
+        var stopwatch = Stopwatch.StartNew();
 
         try
         {
@@ -148,7 +149,7 @@ public class DockerHelper
         }
         finally
         {
-            updateSummary.TotalDuration = DateTime.Now - startTime;
+            updateSummary.TotalDuration = stopwatch.Elapsed;
 
             _logger.LogInformation("Update cycle finished in {Duration}. Successes: {Success}, Rollbacks: {Rollback}, Failed Pulls: {Failed}",
                 updateSummary.TotalDuration.ToString(@"hh\:mm\:ss"), updateSummary.Successes.Count, updateSummary.Rollbacks.Count, updateSummary.FailedPulls.Count);
@@ -167,7 +168,7 @@ public class DockerHelper
     public async Task<UpdateCheckSummary> CheckForAvailableUpdates()
     {
         var checkSummary = new UpdateCheckSummary();
-        var startTime = DateTime.Now;
+        var stopwatch = Stopwatch.StartNew();
 
         try
         {
@@ -299,7 +300,7 @@ public class DockerHelper
         }
         finally
         {
-            checkSummary.TotalDuration = DateTime.Now - startTime;
+            checkSummary.TotalDuration = stopwatch.Elapsed;
         }
 
         return checkSummary;
@@ -308,7 +309,7 @@ public class DockerHelper
     public async Task<UpdateSummary> CheckForImageUpdatesForContainer(string containerName, bool includeDependencies = true)
     {
         var updateSummary = new UpdateSummary();
-        var startTime = DateTime.Now;
+        var stopwatch = Stopwatch.StartNew();
 
         try
         {
@@ -347,7 +348,8 @@ public class DockerHelper
                     return updateSummary;
                 }
 
-                targetGroup = containersGroups.Values.First(group => group.Any(c => c.ID == targetContainer.ID));
+                targetGroup = containersGroups.Values.FirstOrDefault(group => group.Any(c => c.ID == targetContainer.ID))
+                    ?? [targetContainer];
             }
             else
             {
@@ -375,7 +377,7 @@ public class DockerHelper
         }
         finally
         {
-            updateSummary.TotalDuration = DateTime.Now - startTime;
+            updateSummary.TotalDuration = stopwatch.Elapsed;
 
             _logger.LogInformation("Targeted update cycle for {Container} finished in {Duration}. Successes: {Success}, Rollbacks: {Rollback}, Failed Pulls: {Failed}",
                 containerName, updateSummary.TotalDuration.ToString(@"hh\:mm\:ss"), updateSummary.Successes.Count, updateSummary.Rollbacks.Count, updateSummary.FailedPulls.Count);

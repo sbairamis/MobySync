@@ -135,7 +135,7 @@ public class DependencyGraphBuilder
                 return;
 
             if (visiting.Contains(containerName))
-                throw new InvalidOperationException($"An circular dependency has detected involving containers '{containerName}'");
+                throw new InvalidOperationException($"A circular dependency was detected involving container '{containerName}'");
 
             visiting.Add(containerName);
 
