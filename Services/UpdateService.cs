@@ -57,7 +57,10 @@ public class UpdateService(UpdateCoordinator updateCoordinator, ILogger<UpdateSe
 
             logger.LogInformation("Next update at {ScheduledTime:yyyy-MM-dd HH:mm} ({Timezone})", scheduledInTz, timezone.Id);
 
-            var delay = TimeZoneInfo.ConvertTimeToUtc(scheduledInTz, timezone) - DateTime.UtcNow;
+            var scheduledUtc = TimeZoneInfo.ConvertTimeToUtc(scheduledInTz, timezone);
+            updateCoordinator.SetNextScheduledRun(scheduledUtc, timezone.Id);
+
+            var delay = scheduledUtc - DateTime.UtcNow;
 
             if (delay < TimeSpan.Zero)
                 delay = TimeSpan.Zero;
