@@ -71,6 +71,11 @@ public class SimulatedDockerState
     /// </summary>
     public Action<string, string>? OnRenameContainer { get; set; }
 
+    /// <summary>
+    /// Optional hook invoked during image pruning.
+    /// </summary>
+    public Action? OnPruneImages { get; set; }
+
     private int _nextIdCounter = 1;
 
     public IDockerClient CreateClient()
@@ -326,6 +331,7 @@ public class ImageOperationsProxy : DispatchProxy
 
     private Task<ImagesPruneResponse> PruneImagesAsync()
     {
+        State.OnPruneImages?.Invoke();
         State.PruneCalled = true;
         State.OperationLog.Add("prune");
         return Task.FromResult(new ImagesPruneResponse());

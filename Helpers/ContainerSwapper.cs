@@ -169,7 +169,14 @@ public class ContainerSwapper(
 
             if (pruneImages)
             {
-                await dockerClient.Images.PruneImagesAsync(new ImagesPruneParameters());
+                try
+                {
+                    await dockerClient.Images.PruneImagesAsync(new ImagesPruneParameters());
+                }
+                catch (Exception pruneEx)
+                {
+                    logger.LogWarning(pruneEx, "Failed to prune dangling images after self-update of {Container}", originalName);
+                }
             }
 
             summary.Successes.Add(new ContainerUpdateResult

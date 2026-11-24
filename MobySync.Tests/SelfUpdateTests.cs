@@ -671,4 +671,40 @@ public class SelfUpdateTests
         Assert.Contains("metrics", monitoringConn.Endpoint!.Aliases);
         Assert.DoesNotContain(SelfHostname, monitoringConn.Endpoint.Aliases);
     }
+
+    [Fact]
+    public async Task ExecuteSelfUpdateSwap_WhenImagePruneThrows_DoesNotRollbackHealthyReplacementContainer()
+    {
+        var prevPrune = Environment.GetEnvironmentVariable("PRUNE_IMAGES");
+        Environment.SetEnvironmentVariable("PRUNE_IMAGES", "true");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+            state.Containers[SelfId] = CreateDefaultSelfContainer();
+            state.OnPruneImages = () => throw new InvalidOperationException("docker daemon busy pruning");
+
+            var helper = new DockerHelper(
+                NullLogger<DockerHelper>.Instance,
+                new FakeCredentialsHelper(),
+                new FakeRegistryHelper(new Dictionary<string, string?>()),
+                state.CreateClient(),
+                TimeSpan.FromMilliseconds(5),
+                "helper-container-hostname");
+
+            var summary = await helper.ExecuteSelfUpdateSwap(SelfId, SelfImage);
+
+            Assert.Single(summary.Successes);
+            Assert.Empty(summary.Rollbacks);
+
+            var replacement = Assert.Single(state.Containers.Values);
+            Assert.NotEqual(SelfId, replacement.Id);
+            Assert.Equal("mobysync", replacement.Name);
+            Assert.True(replacement.Running);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PRUNE_IMAGES", prevPrune);
+        }
+    }
 }
