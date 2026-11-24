@@ -20,7 +20,7 @@ public class ContainerSwapper(
 
         foreach (var containerForUpdate in containersForReplace)
         {
-            var containerConfiguration = await dockerClient.Containers.InspectContainerAsync(containerForUpdate.ID);
+            ContainerInspectResponse? containerConfiguration = null;
             var baseImageName = ImageTagResolver.FetchBaseImageName(containerForUpdate.Image);
             var targetTag = resolveTargetTag(containerForUpdate, baseImageName);
             var newContainerId = string.Empty;
@@ -29,6 +29,8 @@ public class ContainerSwapper(
 
             try
             {
+                containerConfiguration = await dockerClient.Containers.InspectContainerAsync(containerForUpdate.ID);
+
                 await SwapSingleContainerAsync(
                     containerConfiguration,
                     originalName,
@@ -81,14 +83,17 @@ public class ContainerSwapper(
                     Success = false
                 });
 
-                transactionLog.Push(new ContainerCheckpoint
+                if (containerConfiguration is not null)
                 {
-                    OldId = containerConfiguration.ID,
-                    NewId = newContainerId,
-                    OriginalName = originalName,
-                    BackupName = backupName,
-                    OriginalNetworks = containerConfiguration.NetworkSettings?.Networks
-                });
+                    transactionLog.Push(new ContainerCheckpoint
+                    {
+                        OldId = containerConfiguration.ID,
+                        NewId = newContainerId,
+                        OriginalName = originalName,
+                        BackupName = backupName,
+                        OriginalNetworks = containerConfiguration.NetworkSettings?.Networks
+                    });
+                }
 
                 await AttemptRollback(transactionLog);
                 return;

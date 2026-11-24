@@ -361,4 +361,65 @@ public class DecoupledComponentsTests
         Assert.True(state.Containers[oldDbId].Running);
         Assert.DoesNotContain(state.OperationLog, op => op == "remove:db-backup");
     }
+
+    [Fact]
+    public async Task ContainerSwapper_WhenSecondContainerInspectFails_RollsBackPreviouslyUpdatedGroupContainers()
+    {
+        const string oldDbId = "db-orig-333344445555";
+        const string oldApiId = "api-orig-333344445555";
+
+        var state = new SimulatedDockerState();
+        state.Containers[oldDbId] = new SimulatedContainer
+        {
+            Id = oldDbId,
+            Name = "db",
+            Image = "postgres:latest",
+            Running = true,
+            Hostname = oldDbId[..12]
+        };
+        state.Containers[oldApiId] = new SimulatedContainer
+        {
+            Id = oldApiId,
+            Name = "api",
+            Image = "myorg/api:latest",
+            Running = true,
+            Hostname = oldApiId[..12]
+        };
+
+        state.OnInspectContainer = c =>
+        {
+            if (c.Id == oldApiId)
+                throw new InvalidOperationException("api container inspect failed");
+        };
+
+        var client = state.CreateClient();
+        var healthVerifier = new ContainerHealthVerifier(
+            client,
+            NullLogger.Instance,
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMilliseconds(2));
+        var swapper = new ContainerSwapper(client, healthVerifier, NullLogger.Instance);
+        var resolver = new ImageTagResolver(NullLogger.Instance, "");
+
+        var summary = new UpdateSummary();
+        await swapper.ReplaceContainerGroupAsync(
+            [
+                new ContainerListResponse { ID = oldDbId, Names = ["/db"], Image = "postgres:latest" },
+                new ContainerListResponse { ID = oldApiId, Names = ["/api"], Image = "myorg/api:latest" }
+            ],
+            resolver.ResolveTargetTag,
+            summary);
+
+        Assert.Empty(summary.Successes);
+        Assert.Equal(2, summary.Rollbacks.Count);
+        Assert.Contains(summary.Rollbacks, r => r.ContainerName == "db");
+        Assert.Contains(summary.Rollbacks, r => r.ContainerName == "api" && r.ErrorMessage!.Contains("api container inspect failed"));
+
+        // First container must have been rolled back to its original instance and restarted
+        Assert.True(state.Containers.ContainsKey(oldDbId));
+        Assert.Equal("db", state.Containers[oldDbId].Name);
+        Assert.True(state.Containers[oldDbId].Running);
+        Assert.DoesNotContain(state.Containers.Values, c => c.Name == "db-backup");
+    }
 }
