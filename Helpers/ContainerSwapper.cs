@@ -229,6 +229,12 @@ public class ContainerSwapper(
 
         if (staleBackup is not null)
         {
+            if (string.Equals(staleBackup.State, "running", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Cannot replace container '{originalName}' because backup container '{backupName}' is currently running");
+            }
+
             await dockerClient.Containers.RemoveContainerAsync(staleBackup.ID, new ContainerRemoveParameters { Force = true });
         }
 

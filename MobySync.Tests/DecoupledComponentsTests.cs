@@ -313,4 +313,52 @@ public class DecoupledComponentsTests
         Assert.True(restored.Running);
         Assert.Equal("app-backup", restored.Name);
     }
+
+    [Fact]
+    public async Task ContainerSwapper_WhenStaleBackupContainerIsRunning_AbortsSwapWithoutRemovingRunningBackup()
+    {
+        const string oldDbId = "db-orig-222233334444";
+        const string runningBackupId = "db-running-backup-id";
+
+        var state = new SimulatedDockerState();
+        state.Containers[oldDbId] = new SimulatedContainer
+        {
+            Id = oldDbId,
+            Name = "db",
+            Image = "postgres:latest",
+            Running = true,
+            Hostname = oldDbId[..12]
+        };
+        state.Containers[runningBackupId] = new SimulatedContainer
+        {
+            Id = runningBackupId,
+            Name = "db-backup",
+            Image = "postgres:latest",
+            Running = true
+        };
+
+        var client = state.CreateClient();
+        var healthVerifier = new ContainerHealthVerifier(
+            client,
+            NullLogger.Instance,
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMilliseconds(2));
+        var swapper = new ContainerSwapper(client, healthVerifier, NullLogger.Instance);
+        var resolver = new ImageTagResolver(NullLogger.Instance, "");
+
+        var summary = new UpdateSummary();
+        await swapper.ReplaceContainerGroupAsync(
+            [new ContainerListResponse { ID = oldDbId, Names = ["/db"], Image = "postgres:latest" }],
+            resolver.ResolveTargetTag,
+            summary);
+
+        Assert.Empty(summary.Successes);
+        var rollback = Assert.Single(summary.Rollbacks);
+        Assert.Contains("currently running", rollback.ErrorMessage);
+        Assert.True(state.Containers.ContainsKey(runningBackupId));
+        Assert.True(state.Containers[runningBackupId].Running);
+        Assert.True(state.Containers[oldDbId].Running);
+        Assert.DoesNotContain(state.OperationLog, op => op == "remove:db-backup");
+    }
 }
