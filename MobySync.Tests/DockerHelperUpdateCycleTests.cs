@@ -729,4 +729,75 @@ public class DockerHelperUpdateCycleTests
             ResetUpdateEnvVars(prevExcluded, prevOverrides);
         }
     }
+
+    [Fact]
+    public async Task CheckForImageUpdates_WhenOneGroupHasCircularDependency_SkipsCyclicGroupAndUpdatesOtherGroups()
+    {
+        var prevExcluded = Environment.GetEnvironmentVariable("EXCLUDED_CONTAINERS");
+        var prevOverrides = Environment.GetEnvironmentVariable("IMAGE_TAG_OVERRIDES");
+
+        Environment.SetEnvironmentVariable("EXCLUDED_CONTAINERS", "");
+        Environment.SetEnvironmentVariable("IMAGE_TAG_OVERRIDES", "");
+
+        try
+        {
+            var state = new SimulatedDockerState();
+
+            state.Containers["cycle-a-id"] = new SimulatedContainer
+            {
+                Id = "cycle-a-id",
+                Name = "cycle-a",
+                Image = "myorg/a:latest",
+                ImageId = "sha256:a-old",
+                Running = true,
+                Labels = new Dictionary<string, string> { ["com.mobysync.depends-on"] = "cycle-b" }
+            };
+            state.ImageDigests["sha256:a-old"] = ["myorg/a@sha256:old"];
+
+            state.Containers["cycle-b-id"] = new SimulatedContainer
+            {
+                Id = "cycle-b-id",
+                Name = "cycle-b",
+                Image = "myorg/b:latest",
+                ImageId = "sha256:b-old",
+                Running = true,
+                Labels = new Dictionary<string, string> { ["com.mobysync.depends-on"] = "cycle-a" }
+            };
+            state.ImageDigests["sha256:b-old"] = ["myorg/b@sha256:old"];
+
+            state.Containers["standalone-id"] = new SimulatedContainer
+            {
+                Id = "standalone-id",
+                Name = "standalone-app",
+                Image = "caddy:latest",
+                ImageId = "sha256:caddy-old",
+                Running = true
+            };
+            state.ImageDigests["sha256:caddy-old"] = ["caddy@sha256:old"];
+
+            var registry = new FakeRegistryHelper(new Dictionary<string, string?>
+            {
+                ["myorg/a:latest"] = "sha256:new",
+                ["myorg/b:latest"] = "sha256:new",
+                ["caddy:latest"] = "sha256:new"
+            });
+
+            var helper = CreateHelper(state, registry);
+            var summary = await helper.CheckForImageUpdates();
+
+            Assert.Equal(2, summary.Skipped.Count);
+            Assert.Contains(summary.Skipped, s => s.ContainerName == "cycle-a");
+            Assert.Contains(summary.Skipped, s => s.ContainerName == "cycle-b");
+
+            var success = Assert.Single(summary.Successes);
+            Assert.Equal("standalone-app", success.ContainerName);
+            Assert.True(state.Containers.ContainsKey("cycle-a-id"));
+            Assert.True(state.Containers.ContainsKey("cycle-b-id"));
+            Assert.False(state.Containers.ContainsKey("standalone-id"));
+        }
+        finally
+        {
+            ResetUpdateEnvVars(prevExcluded, prevOverrides);
+        }
+    }
 }

@@ -6,6 +6,47 @@ public class DependencyGraphBuilder
 {
     public Dictionary<string, List<ContainerListResponse>> GroupDependentContainers(IList<ContainerListResponse> monitoredContainers)
     {
+        var components = PartitionConnectedComponents(monitoredContainers);
+        var groupedDictionary = new Dictionary<string, List<ContainerListResponse>>();
+        var groupCounter = 1;
+
+        foreach (var containersGroup in components)
+        {
+            var sortedGroup = SortContainersByDependencies(containersGroup);
+            groupedDictionary.Add($"Auto-Group-{groupCounter}", sortedGroup);
+            groupCounter++;
+        }
+
+        return groupedDictionary;
+    }
+
+    public (Dictionary<string, List<ContainerListResponse>> ValidGroups, List<(List<ContainerListResponse> Containers, string ErrorMessage)> CyclicGroups)
+        GroupDependentContainersSafely(IList<ContainerListResponse> monitoredContainers)
+    {
+        var components = PartitionConnectedComponents(monitoredContainers);
+        var validGroups = new Dictionary<string, List<ContainerListResponse>>();
+        var cyclicGroups = new List<(List<ContainerListResponse> Containers, string ErrorMessage)>();
+        var groupCounter = 1;
+
+        foreach (var containersGroup in components)
+        {
+            try
+            {
+                var sortedGroup = SortContainersByDependencies(containersGroup);
+                validGroups.Add($"Auto-Group-{groupCounter}", sortedGroup);
+                groupCounter++;
+            }
+            catch (InvalidOperationException ex)
+            {
+                cyclicGroups.Add((containersGroup, ex.Message));
+            }
+        }
+
+        return (validGroups, cyclicGroups);
+    }
+
+    private static List<List<ContainerListResponse>> PartitionConnectedComponents(IList<ContainerListResponse> monitoredContainers)
+    {
         var containerMap = monitoredContainers.ToDictionary(
             container => container.Names.First().Replace("/", ""),
             container => container);
@@ -35,8 +76,7 @@ public class DependencyGraphBuilder
         }
 
         var visited = new HashSet<string>();
-        var groupedDictionary = new Dictionary<string, List<ContainerListResponse>>();
-        var groupCounter = 1;
+        var components = new List<List<ContainerListResponse>>();
 
         foreach (var nodeName in containerMap.Keys)
         {
@@ -44,16 +84,11 @@ public class DependencyGraphBuilder
             {
                 var currentGroupNames = new List<string>();
                 ExploreNode(nodeName, currentGroupNames);
-
-                var containersGroup = currentGroupNames.Select(name => containerMap[name]).ToList();
-                var sortedGroup = SortContainersByDependencies(containersGroup);
-
-                groupedDictionary.Add($"Auto-Group-{groupCounter}", sortedGroup);
-                groupCounter++;
+                components.Add(currentGroupNames.Select(name => containerMap[name]).ToList());
             }
         }
 
-        return groupedDictionary;
+        return components;
 
         void ExploreNode(string current, List<string> group)
         {

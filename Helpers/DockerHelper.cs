@@ -107,7 +107,22 @@ public class DockerHelper
             if (monitoredContainers is null)
                 return updateSummary;
 
-            var containersGroups = _graphBuilder.GroupDependentContainers(monitoredContainers);
+            var (containersGroups, cyclicGroups) = _graphBuilder.GroupDependentContainersSafely(monitoredContainers);
+
+            foreach (var (cyclicContainers, errorMessage) in cyclicGroups)
+            {
+                _logger.LogError("Skipping dependency group due to circular dependency: {Error}", errorMessage);
+                foreach (var container in cyclicContainers)
+                {
+                    updateSummary.Skipped.Add(new ContainerUpdateResult
+                    {
+                        ContainerName = container.Names.First().Replace("/", ""),
+                        ImageName = ImageTagResolver.FetchBaseImageName(container.Image),
+                        ErrorMessage = errorMessage,
+                        Success = false
+                    });
+                }
+            }
 
             foreach (var containerGroup in containersGroups)
             {
@@ -299,7 +314,24 @@ public class DockerHelper
             IList<ContainerListResponse> targetGroup;
             if (includeDependencies)
             {
-                var containersGroups = _graphBuilder.GroupDependentContainers(monitoredContainers);
+                var (containersGroups, cyclicGroups) = _graphBuilder.GroupDependentContainersSafely(monitoredContainers);
+                var cyclicMatch = cyclicGroups.FirstOrDefault(g => g.Containers.Any(c => c.ID == targetContainer.ID));
+                if (cyclicMatch.Containers is not null)
+                {
+                    _logger.LogError("Skipping targeted update for {Container} due to circular dependency: {Error}", containerName, cyclicMatch.ErrorMessage);
+                    foreach (var container in cyclicMatch.Containers)
+                    {
+                        updateSummary.Skipped.Add(new ContainerUpdateResult
+                        {
+                            ContainerName = container.Names.First().Replace("/", ""),
+                            ImageName = ImageTagResolver.FetchBaseImageName(container.Image),
+                            ErrorMessage = cyclicMatch.ErrorMessage,
+                            Success = false
+                        });
+                    }
+                    return updateSummary;
+                }
+
                 targetGroup = containersGroups.Values.First(group => group.Any(c => c.ID == targetContainer.ID));
             }
             else
