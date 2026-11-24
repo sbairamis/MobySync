@@ -268,4 +268,49 @@ public class DecoupledComponentsTests
         Assert.Contains(state.ConnectedNetworks, c => c.NetworkIdOrName == "net-metrics" && c.ContainerId == newDb.Id);
         Assert.Contains(state.ConnectedNetworks, c => c.NetworkIdOrName == "net-backend" && c.ContainerId == newWeb.Id);
     }
+
+    [Fact]
+    public async Task ContainerSwapper_AttemptRollback_WhenRenameBackToOriginalNameFails_StillStartsBackupContainer()
+    {
+        const string oldId = "app-orig-111122223333";
+
+        var state = new SimulatedDockerState();
+        state.Containers[oldId] = new SimulatedContainer
+        {
+            Id = oldId,
+            Name = "app",
+            Image = "nginx:latest",
+            Running = true,
+            Hostname = oldId[..12]
+        };
+
+        state.OnStartContainerCrash = c => c.Id != oldId;
+        state.OnRenameContainer = (currentName, newName) =>
+        {
+            if (currentName == "app-backup" && newName == "app")
+                throw new InvalidOperationException("name conflict during rollback rename");
+        };
+
+        var client = state.CreateClient();
+        var healthVerifier = new ContainerHealthVerifier(
+            client,
+            NullLogger.Instance,
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromMilliseconds(2));
+        var swapper = new ContainerSwapper(client, healthVerifier, NullLogger.Instance);
+        var resolver = new ImageTagResolver(NullLogger.Instance, "");
+
+        var summary = new UpdateSummary();
+        await swapper.ReplaceContainerGroupAsync(
+            [new ContainerListResponse { ID = oldId, Names = ["/app"], Image = "nginx:latest" }],
+            resolver.ResolveTargetTag,
+            summary);
+
+        Assert.Single(summary.Rollbacks);
+        var restored = Assert.Single(state.Containers.Values);
+        Assert.Equal(oldId, restored.Id);
+        Assert.True(restored.Running);
+        Assert.Equal("app-backup", restored.Name);
+    }
 }

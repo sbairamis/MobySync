@@ -66,6 +66,11 @@ public class SimulatedDockerState
     /// </summary>
     public Action<ImagesCreateParameters, IProgress<JSONMessage>?>? OnPullImageProgress { get; set; }
 
+    /// <summary>
+    /// Optional hook invoked before renaming a container (currentName, newName).
+    /// </summary>
+    public Action<string, string>? OnRenameContainer { get; set; }
+
     private int _nextIdCounter = 1;
 
     public IDockerClient CreateClient()
@@ -201,6 +206,7 @@ public class ContainerOperationsProxy : DispatchProxy
             throw new InvalidOperationException($"Container '{id}' not found for rename.");
 
         var newName = (parameters.NewName ?? string.Empty).TrimStart('/');
+        State.OnRenameContainer?.Invoke(c.Name, newName);
         State.OperationLog.Add($"rename:{c.Name}->{newName}");
         c.Name = newName;
         return Task.CompletedTask;

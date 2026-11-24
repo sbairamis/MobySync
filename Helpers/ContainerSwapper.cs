@@ -266,9 +266,15 @@ public class ContainerSwapper(
             {
                 if (!string.IsNullOrEmpty(checkpoint.NewId))
                 {
-                    logger.LogInformation("Removing failed container instance");
-
-                    await dockerClient.Containers.RemoveContainerAsync(checkpoint.NewId, new ContainerRemoveParameters { Force = true });
+                    try
+                    {
+                        logger.LogInformation("Removing failed container instance");
+                        await dockerClient.Containers.RemoveContainerAsync(checkpoint.NewId, new ContainerRemoveParameters { Force = true });
+                    }
+                    catch (Exception removeEx)
+                    {
+                        logger.LogWarning(removeEx, "Failed to remove failed container {ContainerId} during rollback of {Container}", checkpoint.NewId, checkpoint.OriginalName);
+                    }
                 }
 
                 var oldContainerInspect = await dockerClient.Containers.InspectContainerAsync(checkpoint.OldId);
@@ -276,28 +282,41 @@ public class ContainerSwapper(
                 // Only rename it back if it currently holds the backup name
                 if (oldContainerInspect.Name.Replace("/", "") == checkpoint.BackupName)
                 {
-                    logger.LogInformation("Restoring original name...");
-
-                    await dockerClient.Containers.RenameContainerAsync(checkpoint.OldId, new ContainerRenameParameters { NewName = checkpoint.OriginalName }, CancellationToken.None);
+                    try
+                    {
+                        logger.LogInformation("Restoring original name...");
+                        await dockerClient.Containers.RenameContainerAsync(checkpoint.OldId, new ContainerRenameParameters { NewName = checkpoint.OriginalName }, CancellationToken.None);
+                    }
+                    catch (Exception renameEx)
+                    {
+                        logger.LogError(renameEx, "Failed to rename backup container {BackupName} back to {OriginalName}; starting backup container directly", checkpoint.BackupName, checkpoint.OriginalName);
+                    }
                 }
 
                 if (checkpoint.OriginalNetworks is not null && checkpoint.OriginalNetworks.Count > 1)
                 {
-                    var currentNetworks = oldContainerInspect.NetworkSettings?.Networks;
-                    foreach (var (networkName, endpoint) in checkpoint.OriginalNetworks)
+                    try
                     {
-                        if (currentNetworks is null || !currentNetworks.ContainsKey(networkName))
+                        var currentNetworks = oldContainerInspect.NetworkSettings?.Networks;
+                        foreach (var (networkName, endpoint) in checkpoint.OriginalNetworks)
                         {
-                            var networkTarget = !string.IsNullOrWhiteSpace(endpoint.NetworkID)
-                                ? endpoint.NetworkID
-                                : networkName;
-
-                            await dockerClient.Networks.ConnectNetworkAsync(networkTarget, new NetworkConnectParameters
+                            if (currentNetworks is null || !currentNetworks.ContainsKey(networkName))
                             {
-                                Container = checkpoint.OldId,
-                                EndpointConfig = SanitizeEndpointSettings(endpoint, checkpoint.OldId)
-                            });
+                                var networkTarget = !string.IsNullOrWhiteSpace(endpoint.NetworkID)
+                                    ? endpoint.NetworkID
+                                    : networkName;
+
+                                await dockerClient.Networks.ConnectNetworkAsync(networkTarget, new NetworkConnectParameters
+                                {
+                                    Container = checkpoint.OldId,
+                                    EndpointConfig = SanitizeEndpointSettings(endpoint, checkpoint.OldId)
+                                });
+                            }
                         }
+                    }
+                    catch (Exception netEx)
+                    {
+                        logger.LogWarning(netEx, "Failed to restore all secondary networks for {Container} during rollback", checkpoint.OriginalName);
                     }
                 }
 
